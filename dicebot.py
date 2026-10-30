@@ -28,6 +28,7 @@ MAX_DICE_COUNT = 100
 MAX_DIE_SIDES = 1000
 MAX_MESSAGE_LEN = 400
 RECONNECT_SECONDS = 5
+KEEPALIVE_SECONDS = 60
 
 TARGETMODE_CLIENT = 1
 TARGETMODE_CHANNEL = 2
@@ -305,6 +306,12 @@ class TS3QueryClient:
         self.transport.sendall((command + "\r\n").encode("utf-8"))
         return self._drain_until_error(timeout=timeout)
 
+    def keepalive_if_idle(self) -> bool:
+        if self.clock() - self.last_command_at < KEEPALIVE_SECONDS:
+            return False
+        self.send_command("whoami")
+        return True
+
     def recv_event(self, timeout: int = 1) -> Optional[Dict[str, str]]:
         if self.event_queue:
             return self.event_queue.pop(0)
@@ -402,6 +409,7 @@ class DiceBot:
     def _connect_and_loop(self) -> None:
         self._connect()
         while True:
+            self.query.keepalive_if_idle()
             event = self.query.recv_event(timeout=5)
             if event is None:
                 continue

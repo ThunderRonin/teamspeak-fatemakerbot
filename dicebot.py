@@ -17,10 +17,11 @@ import sys
 import time
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Mapping, Optional
 
 
 WELCOME_LINE = "Welcome to the TeamSpeak 3 ServerQuery interface"
+DEFAULT_PORTS = {"raw": 10011, "ssh": 10022}
 MAX_DICE_COUNT = 100
 MAX_DIE_SIDES = 1000
 MAX_MESSAGE_LEN = 400
@@ -306,19 +307,27 @@ class TS3QueryClient:
 
 
 class DiceBot:
-    def __init__(self) -> None:
-        self.query_host = os.environ.get("DICEBOT_QUERY_HOST", "127.0.0.1")
-        self.query_port = int(os.environ.get("DICEBOT_QUERY_PORT", "10011"))
-        self.query_user = require_env("DICEBOT_QUERY_USER")
-        self.query_pass = require_env("DICEBOT_QUERY_PASS")
-        self.virtual_server_id = os.environ.get("DICEBOT_VIRTUAL_SERVER_ID", "1")
-        self.public_channel_id = os.environ.get("DICEBOT_PUBLIC_CHANNEL_ID", "2")
-        self.nickname = os.environ.get("DICEBOT_NICKNAME", "DiceBot (query)")
-        self.gm_group_name = os.environ.get("DICEBOT_GM_GROUP_NAME", "GM")
-        self.state_path = os.environ.get("DICEBOT_STATE_PATH", "/home/amirali/teamspeak-dicebot/state.json")
+    def __init__(
+        self,
+        environ: Optional[Mapping[str, str]] = None,
+        query: "Optional[TS3QueryClient]" = None,
+    ) -> None:
+        env = os.environ if environ is None else environ
+        self.query_protocol = normalize_protocol(env.get("DICEBOT_QUERY_PROTOCOL"))
+        self.query_host = env.get("DICEBOT_QUERY_HOST", "127.0.0.1")
+        self.query_port = resolve_query_port(self.query_protocol, env.get("DICEBOT_QUERY_PORT"))
+        self.query_user = require_env("DICEBOT_QUERY_USER", env)
+        self.query_pass = require_env("DICEBOT_QUERY_PASS", env)
+        self.virtual_server_id = env.get("DICEBOT_VIRTUAL_SERVER_ID", "1")
+        self.public_channel_id = env.get("DICEBOT_PUBLIC_CHANNEL_ID", "2")
+        self.nickname = env.get("DICEBOT_NICKNAME", "DiceBot (query)")
+        self.gm_group_name = env.get("DICEBOT_GM_GROUP_NAME", "GM")
+        self.state_path = env.get("DICEBOT_STATE_PATH", "/home/amirali/teamspeak-dicebot/state.json")
+        self.ssh_host_key_sha256 = env.get("DICEBOT_SSH_HOST_KEY_SHA256", "").strip()
+        self.public_channel_name = env.get("DICEBOT_PUBLIC_CHANNEL_NAME", "").strip()
         self.initiative_by_channel: Dict[str, InitiativeState] = {}
         self.group_name_by_id: Dict[str, str] = {}
-        self.query = TS3QueryClient(self.query_host, self.query_port)
+        self.query = query if query is not None else TS3QueryClient(self.query_host, self.query_port)
         self.self_clid: Optional[str] = None
         self._load_state()
 
@@ -555,8 +564,21 @@ class DiceBot:
         os.replace(tmp_path, self.state_path)
 
 
-def require_env(name: str) -> str:
-    value = os.environ.get(name)
+def normalize_protocol(value: Optional[str]) -> str:
+    protocol = (value or "raw").strip().lower() or "raw"
+    if protocol not in DEFAULT_PORTS:
+        raise ValueError(f"DICEBOT_QUERY_PROTOCOL must be raw or ssh, got {value!r}")
+    return protocol
+
+
+def resolve_query_port(protocol: str, port: Optional[str]) -> int:
+    if port is None or not port.strip():
+        return DEFAULT_PORTS[protocol]
+    return int(port)
+
+
+def require_env(name: str, environ: Optional[Mapping[str, str]] = None) -> str:
+    value = (os.environ if environ is None else environ).get(name)
     if not value:
         raise RuntimeError(f"missing required environment variable: {name}")
     return value
@@ -653,7 +675,11 @@ def format_advantage(expr: str, take_highest: bool) -> str:
 
 
 def main() -> int:
-    bot = DiceBot()
+    try:
+        bot = DiceBot()
+    except ValueError as exc:
+        print(f"[dicebot] configuration error: {exc}", file=sys.stderr, flush=True)
+        return 2
     while True:
         try:
             bot.run_forever()

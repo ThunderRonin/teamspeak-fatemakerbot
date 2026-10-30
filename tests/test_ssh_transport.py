@@ -20,6 +20,12 @@ from dicebot import (
 )
 from tests.test_config import BASE_ENV
 
+import dicebot
+
+# DiceBot checks for paramiko at startup in ssh mode; these pretend it is installed.
+PARAMIKO_PRESENT = mock.patch("importlib.util.find_spec", return_value=object())
+PARAMIKO_ABSENT = mock.patch("importlib.util.find_spec", return_value=None)
+
 KEY = b"\x00\x00\x00\x07ssh-rsa\x00\x00\x00\x01\x03"
 FP = "SHA256:" + base64.b64encode(hashlib.sha256(KEY).digest()).decode("ascii").rstrip("=")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -189,14 +195,34 @@ class SshModeTests(unittest.TestCase):
             self.assertIs(client._open_transport(), sentinel)
         opened.assert_called_once_with("h", 10022, "u", "pw", "SHA256:x")
 
+    def test_ssh_mode_without_paramiko_fails_at_startup(self):
+        with PARAMIKO_ABSENT as find_spec:
+            with self.assertRaisesRegex(ValueError, "DICEBOT_QUERY_PROTOCOL=ssh needs paramiko"):
+                DiceBot(environ={**BASE_ENV, "DICEBOT_QUERY_PROTOCOL": "ssh"})
+        find_spec.assert_called_once_with("paramiko")
+
+    def test_main_exits_2_when_ssh_mode_lacks_paramiko(self):
+        err = io.StringIO()
+        env = {**BASE_ENV, "DICEBOT_QUERY_PROTOCOL": "ssh"}
+        with mock.patch.dict(os.environ, env, clear=True), PARAMIKO_ABSENT,              mock.patch("dicebot.time.sleep", side_effect=AssertionError("must not retry")),              contextlib.redirect_stderr(err):
+            self.assertEqual(dicebot.main(), 2)
+        self.assertIn("configuration error: DICEBOT_QUERY_PROTOCOL=ssh needs paramiko", err.getvalue())
+
+    def test_raw_mode_skips_paramiko_check(self):
+        with PARAMIKO_ABSENT as find_spec:
+            DiceBot(environ=BASE_ENV)
+        find_spec.assert_not_called()
+
     def test_dicebot_passes_ssh_credentials(self):
-        bot = DiceBot(environ={**BASE_ENV, "DICEBOT_QUERY_PROTOCOL": "ssh",
-                               "DICEBOT_SSH_HOST_KEY_SHA256": "SHA256:x"})
+        with PARAMIKO_PRESENT:
+            bot = DiceBot(environ={**BASE_ENV, "DICEBOT_QUERY_PROTOCOL": "ssh",
+                                   "DICEBOT_SSH_HOST_KEY_SHA256": "SHA256:x"})
         self.assertEqual(bot.query.ssh_credentials, ("bot", "pw", "SHA256:x"))
 
     def test_password_absent_from_log_output_on_connect_failure(self):
         buf = io.StringIO()
-        bot = DiceBot(environ={**BASE_ENV, "DICEBOT_QUERY_PROTOCOL": "ssh", "DICEBOT_QUERY_PASS": "secret-pw"})
+        with PARAMIKO_PRESENT:
+            bot = DiceBot(environ={**BASE_ENV, "DICEBOT_QUERY_PROTOCOL": "ssh", "DICEBOT_QUERY_PASS": "secret-pw"})
         with mock.patch.object(SshTransport, "open", side_effect=OSError("refused by h:10022 for user bot")), \
              mock.patch("dicebot.time.sleep", side_effect=KeyboardInterrupt), \
              contextlib.redirect_stderr(buf), self.assertRaises(KeyboardInterrupt):

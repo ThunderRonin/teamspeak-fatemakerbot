@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import os
 import random
 import re
@@ -235,6 +236,9 @@ class RawTransport:
         return socket.create_connection((host, port), timeout=10)
 
 
+PARAMIKO_MISSING = "DICEBOT_QUERY_PROTOCOL=ssh needs paramiko: pip install -r requirements.txt"
+
+
 def format_fingerprint(key_bytes: bytes) -> str:
     digest = hashlib.sha256(key_bytes).digest()
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
@@ -272,7 +276,7 @@ class SshTransport:
         try:
             import paramiko
         except ImportError:
-            raise ValueError("DICEBOT_QUERY_PROTOCOL=ssh needs paramiko: pip install -r requirements.txt") from None
+            raise ValueError(PARAMIKO_MISSING) from None
         emit = log if log is not None else _log_stderr
 
         class HostKeyPolicy(paramiko.MissingHostKeyPolicy):
@@ -483,6 +487,9 @@ class DiceBot:
         if query is None:
             ssh_credentials = None
             if self.query_protocol == "ssh":
+                # Fail at startup (exit 2), not inside the reconnect loop; find_spec does not import it.
+                if importlib.util.find_spec("paramiko") is None:
+                    raise ValueError(PARAMIKO_MISSING)
                 ssh_credentials = (self.query_user, self.query_pass, self.ssh_host_key_sha256)
             query = TS3QueryClient(
                 self.query_host, self.query_port, protocol=self.query_protocol, ssh_credentials=ssh_credentials

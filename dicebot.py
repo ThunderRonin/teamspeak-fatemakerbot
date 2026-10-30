@@ -481,7 +481,8 @@ class DiceBot:
         self.gm_group_name = env.get("DICEBOT_GM_GROUP_NAME", "GM")
         self.state_path = env.get("DICEBOT_STATE_PATH", "/home/amirali/teamspeak-dicebot/state.json")
         self.ssh_host_key_sha256 = env.get("DICEBOT_SSH_HOST_KEY_SHA256", "").strip()
-        self.public_channel_name = env.get("DICEBOT_PUBLIC_CHANNEL_NAME", "").strip()
+        self._public_channel_name_override = env.get("DICEBOT_PUBLIC_CHANNEL_NAME", "").strip()
+        self.public_channel_name = self._public_channel_name_override
         self.initiative_by_channel: Dict[str, InitiativeState] = {}
         self.group_name_by_id: Dict[str, str] = {}
         if query is None:
@@ -529,6 +530,7 @@ class DiceBot:
                 f"client_login_password={ts3_escape(self.query_pass)}"
             )
         self.query.send_command(f"use sid={self.virtual_server_id}")
+        self.public_channel_name = self._resolve_public_channel_name()
         self.query.send_command(f"clientupdate client_nickname={ts3_escape(self.nickname)}")
         self.group_name_by_id = self._load_group_names()
         self.self_clid = self._whoami()["client_id"]
@@ -536,6 +538,16 @@ class DiceBot:
         self.query.send_command("servernotifyregister event=textprivate")
         self.query.send_command(f"servernotifyregister event=textchannel id={self.public_channel_id}")
         print("[dicebot] connected and ready", flush=True)
+
+    def _resolve_public_channel_name(self) -> str:
+        if self._public_channel_name_override:
+            return self._public_channel_name_override
+        try:
+            records = self.query.send_command(f"channelinfo cid={self.public_channel_id}")
+            name = records[0].get("channel_name", "").strip() if records else ""
+        except QueryError:
+            name = ""
+        return name or f"channel {self.public_channel_id}"
 
     def _load_group_names(self) -> Dict[str, str]:
         groups = self.query.send_command("servergrouplist")
@@ -594,7 +606,9 @@ class DiceBot:
                 or self.public_channel_id
             )
         if reply_mode == TARGETMODE_CHANNEL and reply_target != self.public_channel_id:
-            self._send_private(invoker_id, "Use private chat with DiceBot outside 10 Session Table.")
+            self._send_private(
+                invoker_id, f"Use private chat with {self.nickname} outside {self.public_channel_name}."
+            )
             return
         try:
             response = self._dispatch_message(msg, info, invoker_name)

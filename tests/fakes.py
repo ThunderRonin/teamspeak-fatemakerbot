@@ -1,5 +1,7 @@
 import socket
 
+from dicebot import QueryError
+
 
 class FakeTransport:
     """Socket duck type for query-protocol tests."""
@@ -59,10 +61,12 @@ class RecordingQuery:
         "whoami": [{"client_id": "9"}],
         "servergrouplist": [{"sgid": "6", "name": "GM"}],
         "channelinfo": [{"channel_name": "Hallucinators"}],
+        "clientinfo": [{"cid": "5", "client_servergroups": "8"}],
     }
 
-    def __init__(self):
+    def __init__(self, fail=()):
         self.commands = []
+        self.fail = set(fail)
 
     def connect(self):
         pass
@@ -72,4 +76,6 @@ class RecordingQuery:
 
     def send_command(self, cmd, timeout=10):
         self.commands.append(cmd)
+        if cmd.split()[0] in self.fail:
+            raise QueryError(f"{cmd.split()[0]} denied")
         return [dict(r) for r in self.CANNED.get(cmd.split()[0], [])]

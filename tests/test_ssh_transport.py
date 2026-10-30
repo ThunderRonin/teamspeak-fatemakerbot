@@ -204,7 +204,9 @@ class SshModeTests(unittest.TestCase):
     def test_main_exits_2_when_ssh_mode_lacks_paramiko(self):
         err = io.StringIO()
         env = {**BASE_ENV, "DICEBOT_QUERY_PROTOCOL": "ssh"}
-        with mock.patch.dict(os.environ, env, clear=True), PARAMIKO_ABSENT,              mock.patch("dicebot.time.sleep", side_effect=AssertionError("must not retry")),              contextlib.redirect_stderr(err):
+        with mock.patch.dict(os.environ, env, clear=True), PARAMIKO_ABSENT, \
+             mock.patch("dicebot.time.sleep", side_effect=AssertionError("must not retry")), \
+             contextlib.redirect_stderr(err):
             self.assertEqual(dicebot.main(), 2)
         self.assertIn("configuration error: DICEBOT_QUERY_PROTOCOL=ssh needs paramiko", err.getvalue())
 

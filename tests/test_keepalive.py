@@ -9,7 +9,8 @@ class KeepaliveTests(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock(1000.0)  # step 0: time moves only via advance()
         self.t = FakeTransport(banner=TS3_BANNER, responses={"whoami": "client_id=7\nerror id=0 msg=ok\n"})
-        self.c = TS3QueryClient("h", 1, transport_factory=lambda: self.t, clock=self.clock)
+        self.c = TS3QueryClient("h", 1, transport_factory=lambda: self.t, clock=self.clock,
+                              sleep=lambda seconds: None)
         self.c.connect()
         self.c.send_command("use sid=1")
         self.t.sent.clear()

@@ -12,3 +12,4 @@ state.json
 venv
 .idea
 .vscode
+tests/

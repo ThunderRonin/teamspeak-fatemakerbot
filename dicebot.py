@@ -32,7 +32,7 @@ MAX_DIE_SIDES = 1000
 MAX_MESSAGE_LEN = 400
 RECONNECT_SECONDS = 5
 KEEPALIVE_SECONDS = 60
-COMMAND_INTERVAL_SECONDS = 0.4  # TS6 floods at 10 commands/3 s; stay well under
+COMMAND_INTERVAL_SECONDS = 0.4  # TS3 and TS6 default flood limit is 10 commands per 3 s; stay well under
 
 TARGETMODE_CLIENT = 1
 TARGETMODE_CHANNEL = 2
@@ -370,11 +370,12 @@ class TS3QueryClient:
                 break
             if self.clock() >= deadline:
                 raise QueryError(f"unexpected greeting: {greeting!r}")
-        self._consume_banner_trailer()
+        if self.protocol == "ssh":
+            self._consume_banner_trailer()
         self.last_command_at = self.clock()
 
     def _consume_banner_trailer(self) -> None:
-        # TS6 SSH follows the welcome with status lines; TS3 raw sends nothing more.
+        # TS6 SSH may follow the welcome with status lines (beta13.1 sends none); raw TS3 never does, so connect() skips this in raw mode.
         while True:
             line = self._wait_for_line(timeout=BANNER_SETTLE_SECONDS, allow_timeout=True)
             if line is None:

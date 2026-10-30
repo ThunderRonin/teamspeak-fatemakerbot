@@ -19,7 +19,7 @@ TS6_BANNER = (
 
 def make_client(banner, responses=None, protocol="raw"):
     t = FakeTransport(banner=banner, responses=responses)
-    c = TS3QueryClient("h", 1, protocol=protocol, transport_factory=lambda: t)
+    c = TS3QueryClient("h", 1, protocol=protocol, transport_factory=lambda: t, sleep=lambda seconds: None)
     return c, t
 
 
@@ -28,14 +28,22 @@ class BannerTests(unittest.TestCase):
         c, _ = make_client(TS3_BANNER)
         c.connect()
 
+    def test_raw_connect_does_not_wait_for_a_banner_trailer(self):
+        c, t = make_client(TS3_BANNER)
+        recv_calls = []
+        real_recv = t.recv
+        t.recv = lambda n: (recv_calls.append(n), real_recv(n))[1]
+        c.connect()
+        self.assertEqual(len(recv_calls), 1)  # the welcome line only; no settle wait
+
     def test_accepts_ts6_ssh_banner_and_consumes_trailer(self):
-        c, t = make_client(TS6_BANNER, {"use": "error id=0 msg=ok\n"})
+        c, t = make_client(TS6_BANNER, {"use": "error id=0 msg=ok\n"}, protocol="ssh")
         c.connect()
         self.assertEqual(c.send_command("use sid=1"), [])
         self.assertEqual(c.buffer, "")
 
     def test_first_command_after_ts6_banner_returns_its_own_records(self):
-        c, t = make_client(TS6_BANNER, {"whoami": "client_id=7 client_channel_id=2\nerror id=0 msg=ok\n"})
+        c, t = make_client(TS6_BANNER, {"whoami": "client_id=7 client_channel_id=2\nerror id=0 msg=ok\n"}, protocol="ssh")
         c.connect()
         self.assertEqual(c.send_command("whoami")[0]["client_id"], "7")
 
@@ -51,7 +59,7 @@ class BannerTests(unittest.TestCase):
             c.connect()
 
     def test_eof_during_command_raises_query_error(self):
-        c, t = make_client(TS6_BANNER)
+        c, t = make_client(TS6_BANNER, protocol="ssh")
         c.connect()
         t.eof = True
         with self.assertRaises(QueryError):

@@ -6,6 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
 # Dedicated unprivileged runtime user
 RUN groupadd --gid 10001 dicebot \
     && useradd --uid 10001 --gid dicebot --no-create-home dicebot \

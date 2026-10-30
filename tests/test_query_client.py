@@ -67,8 +67,8 @@ class BannerTests(unittest.TestCase):
     def test_close_without_transport_is_noop(self):
         TS3QueryClient("h", 1).close()
 
-    def test_ssh_without_factory_fails_cleanly(self):
-        with self.assertRaisesRegex(QueryError, "ssh"):
+    def test_ssh_without_factory_or_credentials_fails_cleanly(self):
+        with self.assertRaisesRegex(QueryError, "ssh transport needs ssh_credentials"):
             TS3QueryClient("h", 1, protocol="ssh").connect()
 
     def test_no_banner_within_deadline_raises_query_error(self):

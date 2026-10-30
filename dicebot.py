@@ -8,6 +8,8 @@ plus lightweight initiative tracking.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import random
 import re
@@ -233,6 +235,91 @@ class RawTransport:
         return socket.create_connection((host, port), timeout=10)
 
 
+def format_fingerprint(key_bytes: bytes) -> str:
+    digest = hashlib.sha256(key_bytes).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def fingerprint_matches(expected: str, key_bytes: bytes) -> bool:
+    normalized = expected.strip()
+    if normalized.startswith("SHA256:"):
+        normalized = normalized[len("SHA256:"):]
+    normalized = normalized.rstrip("=")
+    return "SHA256:" + normalized == format_fingerprint(key_bytes)
+
+
+def _log_stderr(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+class SshTransport:
+    """ServerQuery over SSH: password auth, then a shell channel without a PTY."""
+
+    def __init__(self, client: object, channel: object) -> None:
+        self._client = client
+        self._channel = channel
+
+    @classmethod
+    def open(
+        cls,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        expected_fingerprint: str,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> "SshTransport":
+        try:
+            import paramiko
+        except ImportError:
+            raise ValueError("DICEBOT_QUERY_PROTOCOL=ssh needs paramiko: pip install -r requirements.txt") from None
+        emit = log if log is not None else _log_stderr
+
+        class HostKeyPolicy(paramiko.MissingHostKeyPolicy):
+            def missing_host_key(self, client, hostname, key):
+                actual = format_fingerprint(key.asbytes())
+                if expected_fingerprint:
+                    if not fingerprint_matches(expected_fingerprint, key.asbytes()):
+                        raise QueryError(f"SSH host key mismatch: expected {expected_fingerprint}, got {actual}")
+                    return
+                emit(f"[dicebot] SSH host key fingerprint (set DICEBOT_SSH_HOST_KEY_SHA256 to pin): {actual}")
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(HostKeyPolicy())
+        try:
+            client.connect(
+                host,
+                port=port,
+                username=username,
+                password=password,
+                look_for_keys=False,
+                allow_agent=False,
+                timeout=10,
+            )
+            # SSHClient.invoke_shell() always requests a PTY; TS6 expects a plain shell.
+            channel = client.get_transport().open_session()
+            channel.invoke_shell()
+        except BaseException:
+            client.close()
+            raise
+        return cls(client, channel)
+
+    def sendall(self, data: bytes) -> None:
+        self._channel.sendall(data)
+
+    def recv(self, n: int) -> bytes:
+        return self._channel.recv(n)
+
+    def settimeout(self, t: Optional[float]) -> None:
+        self._channel.settimeout(t)
+
+    def close(self) -> None:
+        try:
+            self._channel.close()
+        finally:
+            self._client.close()
+
+
 class TS3QueryClient:
     def __init__(
         self,
@@ -241,10 +328,15 @@ class TS3QueryClient:
         protocol: str = "raw",
         transport_factory: Optional[Callable[[], Transport]] = None,
         clock: Callable[[], float] = time.monotonic,
+        ssh_credentials: Optional[tuple[str, str, str]] = None,
     ) -> None:
         self.host = host
         self.port = port
         self.protocol = protocol
+        self.ssh_credentials = ssh_credentials
+        if transport_factory is None and protocol == "ssh" and ssh_credentials is not None:
+            user, password, fingerprint = ssh_credentials
+            transport_factory = lambda: SshTransport.open(self.host, self.port, user, password, fingerprint)
         self.transport_factory = transport_factory
         self.clock = clock
         self.transport: Optional[Transport] = None
@@ -257,7 +349,7 @@ class TS3QueryClient:
             return self.transport_factory()
         if self.protocol == "raw":
             return RawTransport.open(self.host, self.port)
-        raise QueryError("ssh transport not available")
+        raise QueryError("ssh transport needs ssh_credentials")
 
     def connect(self) -> None:
         self.close()
@@ -388,7 +480,14 @@ class DiceBot:
         self.public_channel_name = env.get("DICEBOT_PUBLIC_CHANNEL_NAME", "").strip()
         self.initiative_by_channel: Dict[str, InitiativeState] = {}
         self.group_name_by_id: Dict[str, str] = {}
-        self.query = query if query is not None else TS3QueryClient(self.query_host, self.query_port, protocol=self.query_protocol)
+        if query is None:
+            ssh_credentials = None
+            if self.query_protocol == "ssh":
+                ssh_credentials = (self.query_user, self.query_pass, self.ssh_host_key_sha256)
+            query = TS3QueryClient(
+                self.query_host, self.query_port, protocol=self.query_protocol, ssh_credentials=ssh_credentials
+            )
+        self.query = query
         self.self_clid: Optional[str] = None
         self._load_state()
 

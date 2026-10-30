@@ -39,9 +39,9 @@ class BannerTests(unittest.TestCase):
         c.connect()
         self.assertEqual(c.send_command("whoami")[0]["client_id"], "7")
 
-    def test_unexpected_banner_raises_query_error(self):
+    def test_unexpected_banner_then_silence_raises_query_error(self):
         c, _ = make_client("SSH-2.0-nothing\n")
-        with self.assertRaises(QueryError):
+        with self.assertRaisesRegex(QueryError, "timed out"):
             c.connect()
 
     def test_eof_before_banner_raises_query_error(self):
@@ -72,7 +72,7 @@ class BannerTests(unittest.TestCase):
             TS3QueryClient("h", 1, protocol="ssh").connect()
 
     def test_no_banner_within_deadline_raises_query_error(self):
-        c, _ = make_client("")
+        c, _ = make_client("SSH-2.0-x\nfoo\nbar\n")
         c.clock = FakeClock(0.0, step=5.0)
-        with self.assertRaises(QueryError):
+        with self.assertRaisesRegex(QueryError, "unexpected greeting"):
             c.connect()

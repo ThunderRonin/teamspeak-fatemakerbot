@@ -1,0 +1,39 @@
+services:
+  fatemaker:
+    container_name: fatemaker
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    restart: unless-stopped
+    init: true
+
+    env_file:
+      - dicebot.env
+
+    environment:
+      DICEBOT_STATE_PATH: /data/state.json
+
+    volumes:
+      - fatemaker-data:/data
+
+    # Linux: resolve host.docker.internal to the Docker host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    read_only: true
+
+    tmpfs:
+      - /tmp:size=16M
+
+    stop_grace_period: 15s
+
+volumes:
+  fatemaker-data:
+    name: fatemaker-data

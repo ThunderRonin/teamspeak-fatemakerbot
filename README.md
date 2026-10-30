@@ -4,7 +4,9 @@ Air-gapped TeamSpeak dice bot for `hallucinators`.
 
 ## Files
 
-- `dicebot.py`: bot implementation, pure Python stdlib
+- `dicebot.py`: bot implementation; raw mode is pure Python stdlib, ssh mode needs `paramiko`
+- `requirements.txt`: pinned `paramiko` for ssh mode
+- `tests/`: unit tests
 - `dicebot.env.example`: runtime configuration template
 - `teamspeak-dicebot.service`: systemd unit
 
@@ -44,3 +46,24 @@ Air-gapped TeamSpeak dice bot for `hallucinators`.
   - `4d6dh1`
   - `4d6dl1`
 - reconnect logic accounts for delayed TeamSpeak query startup
+
+## TeamSpeak 6 (SSH query)
+
+TeamSpeak 6 has no raw ServerQuery. Of its query interfaces (SSH and HTTP WebQuery) only SSH delivers chat events, so the bot uses SSH. Set `DICEBOT_QUERY_PROTOCOL=ssh` to use it. The default, `raw`, is TeamSpeak 3 ServerQuery and needs no extra packages.
+
+- `DICEBOT_QUERY_USER` and `DICEBOT_QUERY_PASS` are the query login.
+- `DICEBOT_QUERY_PORT` defaults to `10022` in ssh mode (`10011` in raw mode).
+- ssh mode needs `paramiko`: `pip install -r requirements.txt`. The Docker image already includes it. Behind a network that needs a PyPI mirror, pass `--build-arg PIP_INDEX_URL=<mirror>` to `docker build`.
+- `DICEBOT_SSH_HOST_KEY_SHA256` (optional) pins the server key, as `SHA256:<base64>` or bare base64. When unset, the bot accepts any key and logs the fingerprint on every connect, so you can copy it into the setting.
+- `DICEBOT_PUBLIC_CHANNEL_NAME` (optional) sets the channel name used in replies. When unset, the bot reads it from `channelinfo` and falls back to `channel <id>`.
+
+## Connection behavior (both modes)
+
+These apply to both `raw` (TeamSpeak 3) and `ssh` (TeamSpeak 6) modes:
+
+- After 60 seconds without a command the bot sends `whoami` as a keepalive, and it sends `quit` before closing the connection.
+- The bot spaces its query commands at least 0.4 s apart to stay under TeamSpeak's default flood limit (10 commands per 3 s); operators can also add the bot's IP to `query_ip_allowlist.txt`.
+
+## Tests
+
+`python -m unittest discover -s tests -v` (no `paramiko` needed)

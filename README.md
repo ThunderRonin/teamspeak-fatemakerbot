@@ -57,6 +57,7 @@ TeamSpeak 6 has no raw ServerQuery, only SSH query. Set `DICEBOT_QUERY_PROTOCOL=
 - `DICEBOT_SSH_HOST_KEY_SHA256` (optional) pins the server key, as `SHA256:<base64>` or bare base64. When unset, the bot accepts any key and logs the fingerprint on every connect, so you can copy it into the setting.
 - `DICEBOT_PUBLIC_CHANNEL_NAME` (optional) sets the channel name used in replies. When unset, the bot reads it from `channelinfo` and falls back to `channel <id>`.
 - After 60 seconds without a command the bot sends `whoami` as a keepalive, and it sends `quit` before closing the connection.
+- The bot spaces its query commands at least 0.4 s apart to stay under TeamSpeak's default flood limit; operators can also add the bot's IP to `query_ip_allowlist.txt`.
 
 ## Tests
 

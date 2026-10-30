@@ -32,6 +32,7 @@ MAX_DIE_SIDES = 1000
 MAX_MESSAGE_LEN = 400
 RECONNECT_SECONDS = 5
 KEEPALIVE_SECONDS = 60
+COMMAND_INTERVAL_SECONDS = 0.4  # TS6 floods at 10 commands/3 s; stay well under
 
 TARGETMODE_CLIENT = 1
 TARGETMODE_CHANNEL = 2
@@ -333,6 +334,7 @@ class TS3QueryClient:
         transport_factory: Optional[Callable[[], Transport]] = None,
         clock: Callable[[], float] = time.monotonic,
         ssh_credentials: Optional[tuple[str, str, str]] = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.host = host
         self.port = port
@@ -343,6 +345,7 @@ class TS3QueryClient:
             transport_factory = lambda: SshTransport.open(self.host, self.port, user, password, fingerprint)
         self.transport_factory = transport_factory
         self.clock = clock
+        self.sleep = sleep
         self.transport: Optional[Transport] = None
         self.buffer = ""
         self.event_queue: List[Dict[str, str]] = []
@@ -398,6 +401,9 @@ class TS3QueryClient:
     def send_command(self, command: str, timeout: int = 10) -> List[Dict[str, str]]:
         if self.transport is None:
             raise QueryError("not connected")
+        remaining = COMMAND_INTERVAL_SECONDS - (self.clock() - self.last_command_at)
+        if remaining > 0:
+            self.sleep(remaining)
         self.last_command_at = self.clock()
         self.transport.sendall((command + "\r\n").encode("utf-8"))
         return self._drain_until_error(timeout=timeout)

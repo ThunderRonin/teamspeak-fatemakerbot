@@ -34,3 +34,42 @@ class FakeTransport:
 
     def feed(self, text):
         self.incoming.append(text.encode("utf-8"))
+
+
+class FakeClock:
+    """Callable clock: returns `now`, then advances it by `step`."""
+
+    def __init__(self, now=0.0, step=0.0):
+        self.now = now
+        self.step = step
+
+    def __call__(self):
+        value = self.now
+        self.now += self.step
+        return value
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class RecordingQuery:
+    """TS3QueryClient stand-in for DiceBot tests."""
+
+    CANNED = {
+        "whoami": [{"client_id": "9"}],
+        "servergrouplist": [{"sgid": "6", "name": "GM"}],
+        "channelinfo": [{"channel_name": "Hallucinators"}],
+    }
+
+    def __init__(self):
+        self.commands = []
+
+    def connect(self):
+        pass
+
+    def close(self):
+        pass
+
+    def send_command(self, cmd, timeout=10):
+        self.commands.append(cmd)
+        return [dict(r) for r in self.CANNED.get(cmd.split()[0], [])]

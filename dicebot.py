@@ -17,10 +17,12 @@ import sys
 import time
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional
+from typing import Callable, Dict, List, Mapping, Optional, Protocol
 
 
-WELCOME_LINE = "Welcome to the TeamSpeak 3 ServerQuery interface"
+WELCOME_LINE = "Welcome to the TeamSpeak"
+BANNER_DEADLINE_SECONDS = 15
+BANNER_SETTLE_SECONDS = 1.0
 DEFAULT_PORTS = {"raw": 10011, "ssh": 10022}
 MAX_DICE_COUNT = 100
 MAX_DIE_SIDES = 1000
@@ -214,41 +216,93 @@ class QueryError(RuntimeError):
     pass
 
 
+class Transport(Protocol):
+    def sendall(self, data: bytes) -> None: ...
+
+    def recv(self, n: int) -> bytes: ...
+
+    def settimeout(self, t: Optional[float]) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class RawTransport:
+    @staticmethod
+    def open(host: str, port: int) -> Transport:
+        return socket.create_connection((host, port), timeout=10)
+
+
 class TS3QueryClient:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        protocol: str = "raw",
+        transport_factory: Optional[Callable[[], Transport]] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.host = host
         self.port = port
-        self.sock: Optional[socket.socket] = None
+        self.protocol = protocol
+        self.transport_factory = transport_factory
+        self.clock = clock
+        self.transport: Optional[Transport] = None
         self.buffer = ""
         self.event_queue: List[Dict[str, str]] = []
+        self.last_command_at = self.clock()
+
+    def _open_transport(self) -> Transport:
+        if self.transport_factory is not None:
+            return self.transport_factory()
+        if self.protocol == "raw":
+            return RawTransport.open(self.host, self.port)
+        raise QueryError("ssh transport not available")
 
     def connect(self) -> None:
         self.close()
-        sock = socket.create_connection((self.host, self.port), timeout=10)
-        sock.settimeout(10)
-        self.sock = sock
-        deadline = time.time() + 15
+        transport = self._open_transport()
+        transport.settimeout(10)
+        self.transport = transport
+        deadline = self.clock() + BANNER_DEADLINE_SECONDS
         while True:
-            greeting = self._wait_for_line(timeout=max(0.1, deadline - time.time()))
+            greeting = self._wait_for_line(timeout=max(0.1, deadline - self.clock()))
             if WELCOME_LINE in greeting:
                 break
-            if time.time() >= deadline:
+            if self.clock() >= deadline:
                 raise QueryError(f"unexpected greeting: {greeting!r}")
+        self._consume_banner_trailer()
+        self.last_command_at = self.clock()
+
+    def _consume_banner_trailer(self) -> None:
+        # TS6 SSH follows the welcome with status lines; TS3 raw sends nothing more.
+        while True:
+            line = self._wait_for_line(timeout=BANNER_SETTLE_SECONDS, allow_timeout=True)
+            if line is None:
+                return
+            if line == "" or line.startswith("virtualserver_status=") or line.startswith("error id=0"):
+                continue
+            self.buffer = line + "\n" + self.buffer  # not ours; put it back
+            return
 
     def close(self) -> None:
-        if self.sock is not None:
+        if self.transport is not None:
             try:
-                self.sock.close()
+                self.transport.sendall(b"quit\r\n")
             except Exception:
                 pass
-        self.sock = None
+            try:
+                self.transport.close()
+            except Exception:
+                pass
+        self.transport = None
         self.buffer = ""
         self.event_queue.clear()
 
     def send_command(self, command: str, timeout: int = 10) -> List[Dict[str, str]]:
-        if self.sock is None:
+        if self.transport is None:
             raise QueryError("not connected")
-        self.sock.sendall((command + "\r\n").encode("utf-8"))
+        self.last_command_at = self.clock()
+        self.transport.sendall((command + "\r\n").encode("utf-8"))
         return self._drain_until_error(timeout=timeout)
 
     def recv_event(self, timeout: int = 1) -> Optional[Dict[str, str]]:
@@ -274,9 +328,9 @@ class TS3QueryClient:
                 line, self.buffer = self.buffer.split("\n", 1)
                 return line.strip("\r")
             try:
-                assert self.sock is not None
-                self.sock.settimeout(timeout)
-                chunk = self.sock.recv(65535)
+                assert self.transport is not None
+                self.transport.settimeout(timeout)
+                chunk = self.transport.recv(65535)
             except socket.timeout:
                 if allow_timeout:
                     return None
@@ -327,7 +381,7 @@ class DiceBot:
         self.public_channel_name = env.get("DICEBOT_PUBLIC_CHANNEL_NAME", "").strip()
         self.initiative_by_channel: Dict[str, InitiativeState] = {}
         self.group_name_by_id: Dict[str, str] = {}
-        self.query = query if query is not None else TS3QueryClient(self.query_host, self.query_port)
+        self.query = query if query is not None else TS3QueryClient(self.query_host, self.query_port, protocol=self.query_protocol)
         self.self_clid: Optional[str] = None
         self._load_state()
 
@@ -346,11 +400,20 @@ class DiceBot:
                 backoff = min(backoff * 2, 30)
 
     def _connect_and_loop(self) -> None:
+        self._connect()
+        while True:
+            event = self.query.recv_event(timeout=5)
+            if event is None:
+                continue
+            self._handle_event(event)
+
+    def _connect(self) -> None:
         self.query.connect()
-        self.query.send_command(
-            f"login client_login_name={ts3_escape(self.query_user)} "
-            f"client_login_password={ts3_escape(self.query_pass)}"
-        )
+        if self.query_protocol == "raw":
+            self.query.send_command(
+                f"login client_login_name={ts3_escape(self.query_user)} "
+                f"client_login_password={ts3_escape(self.query_pass)}"
+            )
         self.query.send_command(f"use sid={self.virtual_server_id}")
         self.query.send_command(f"clientupdate client_nickname={ts3_escape(self.nickname)}")
         self.group_name_by_id = self._load_group_names()
@@ -359,11 +422,6 @@ class DiceBot:
         self.query.send_command("servernotifyregister event=textprivate")
         self.query.send_command(f"servernotifyregister event=textchannel id={self.public_channel_id}")
         print("[dicebot] connected and ready", flush=True)
-        while True:
-            event = self.query.recv_event(timeout=5)
-            if event is None:
-                continue
-            self._handle_event(event)
 
     def _load_group_names(self) -> Dict[str, str]:
         groups = self.query.send_command("servergrouplist")

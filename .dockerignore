@@ -13,3 +13,6 @@ venv
 .idea
 .vscode
 tests/
+node_modules/
+identity.json
+data/

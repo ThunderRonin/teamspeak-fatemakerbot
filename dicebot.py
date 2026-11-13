@@ -492,165 +492,20 @@ class TS3QueryClient:
             records.extend(parse_records(line))
 
 
-class DiceBot:
-    def __init__(
-        self,
-        environ: Optional[Mapping[str, str]] = None,
-        query: "Optional[TS3QueryClient]" = None,
-    ) -> None:
+class DiceEngine:
+    """Dice and initiative behavior shared by the TeamSpeak transports."""
+
+    def __init__(self, environ: Optional[Mapping[str, str]] = None) -> None:
         env = os.environ if environ is None else environ
-        self.query_protocol = normalize_protocol(env.get("DICEBOT_QUERY_PROTOCOL"))
-        self.query_host = env.get("DICEBOT_QUERY_HOST", "127.0.0.1")
-        self.query_port = resolve_query_port(self.query_protocol, env.get("DICEBOT_QUERY_PORT"))
-        self.query_user = require_env("DICEBOT_QUERY_USER", env)
-        self.query_pass = require_env("DICEBOT_QUERY_PASS", env)
-        self.virtual_server_id = env.get("DICEBOT_VIRTUAL_SERVER_ID", "1")
         self.public_channel_id = env.get("DICEBOT_PUBLIC_CHANNEL_ID", "2")
         self.nickname = env.get("DICEBOT_NICKNAME", "DiceBot (query)")
         self.gm_group_name = env.get("DICEBOT_GM_GROUP_NAME", "GM")
         self.state_path = env.get("DICEBOT_STATE_PATH", "/home/amirali/teamspeak-dicebot/state.json")
-        self.ssh_host_key_sha256 = env.get("DICEBOT_SSH_HOST_KEY_SHA256", "").strip()
         self._public_channel_name_override = env.get("DICEBOT_PUBLIC_CHANNEL_NAME", "").strip()
         self.public_channel_name = self._public_channel_name_override
         self.initiative_by_channel: Dict[str, InitiativeState] = {}
         self.group_name_by_id: Dict[str, str] = {}
-        if query is None:
-            ssh_credentials = None
-            if self.query_protocol == "ssh":
-                # Fail at startup (exit 2), not inside the reconnect loop; find_spec does not import it.
-                if importlib.util.find_spec("paramiko") is None:
-                    raise ValueError(PARAMIKO_MISSING)
-                ssh_credentials = (self.query_user, self.query_pass, self.ssh_host_key_sha256)
-            query = TS3QueryClient(
-                self.query_host, self.query_port, protocol=self.query_protocol, ssh_credentials=ssh_credentials
-            )
-        self.query = query
-        self.self_clid: Optional[str] = None
         self._load_state()
-
-    def run_forever(self) -> None:
-        backoff = RECONNECT_SECONDS
-        while True:
-            try:
-                self._connect_and_loop()
-                backoff = RECONNECT_SECONDS
-            except KeyboardInterrupt:
-                raise
-            except Exception as exc:
-                print(f"[dicebot] connection loop failed: {exc}", file=sys.stderr, flush=True)
-                self.query.close()
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 30)
-
-    def _connect_and_loop(self) -> None:
-        self._connect()
-        while True:
-            self.query.keepalive_if_idle()
-            event = self.query.recv_event(timeout=5)
-            if event is None:
-                continue
-            self._handle_event(event)
-
-    def _connect(self) -> None:
-        self.query.connect()
-        if self.query_protocol == "raw":
-            self.query.send_command(
-                f"login client_login_name={ts3_escape(self.query_user)} "
-                f"client_login_password={ts3_escape(self.query_pass)}"
-            )
-        self.query.send_command(f"use sid={self.virtual_server_id}")
-        self.public_channel_name = self._resolve_public_channel_name()
-        self.query.send_command(f"clientupdate client_nickname={ts3_escape(self.nickname)}")
-        self.group_name_by_id = self._load_group_names()
-        identity = self._whoami()
-        self.self_clid = identity["client_id"]
-        if identity.get("client_channel_id") != self.public_channel_id:
-            self.query.send_command(f"clientmove clid={self.self_clid} cid={self.public_channel_id}")
-        self.query.send_command("servernotifyregister event=textprivate")
-        self.query.send_command(f"servernotifyregister event=textchannel id={self.public_channel_id}")
-        print("[dicebot] connected and ready", flush=True)
-
-    def _resolve_public_channel_name(self) -> str:
-        if self._public_channel_name_override:
-            return self._public_channel_name_override
-        try:
-            records = self.query.send_command(f"channelinfo cid={self.public_channel_id}")
-            name = records[0].get("channel_name", "").strip() if records else ""
-        except QueryError:
-            name = ""
-        return name or f"channel {self.public_channel_id}"
-
-    def _load_group_names(self) -> Dict[str, str]:
-        groups = self.query.send_command("servergrouplist")
-        return {record["sgid"]: record["name"] for record in groups if "sgid" in record and "name" in record}
-
-    def _whoami(self) -> Dict[str, str]:
-        records = self.query.send_command("whoami")
-        if not records:
-            raise QueryError("whoami returned no records")
-        return records[0]
-
-    def _client_info(self, clid: str) -> Dict[str, str]:
-        records = self.query.send_command(f"clientinfo clid={clid}")
-        if not records:
-            raise QueryError(f"clientinfo returned no data for clid={clid}")
-        return records[0]
-
-    def _send_private(self, clid: str, message: str) -> None:
-        message = message[:MAX_MESSAGE_LEN]
-        self.query.send_command(
-            f"sendtextmessage targetmode={TARGETMODE_CLIENT} target={clid} msg={ts3_escape(message)}"
-        )
-
-    def _send_channel(self, cid: str, message: str) -> None:
-        message = message[:MAX_MESSAGE_LEN]
-        self.query.send_command(
-            f"sendtextmessage targetmode={TARGETMODE_CHANNEL} target={cid} msg={ts3_escape(message)}"
-        )
-
-    def _handle_event(self, event: Dict[str, str]) -> None:
-        event_name = event.get("event", "")
-        if event_name not in {"notifytextmessage", "notifytextprivate", "notifytextchannel"}:
-            return
-        invoker_id = event.get("invokerid")
-        invoker_name = event.get("invokername", "unknown")
-        msg = event.get("msg", "").strip()
-        if not invoker_id or not msg:
-            return
-        if invoker_id == self.self_clid:
-            return
-        info = self._client_info(invoker_id)
-        reply_mode = TARGETMODE_CLIENT
-        if event_name == "notifytextchannel" or event.get("targetmode") == str(TARGETMODE_CHANNEL):
-            reply_mode = TARGETMODE_CHANNEL
-
-        if reply_mode == TARGETMODE_CLIENT:
-            reply_target = invoker_id
-        else:
-            # Prefer the exact event target so replies go back to the same channel
-            # the command arrived from, even if the sender moves immediately after.
-            reply_target = (
-                event.get("target")
-                or event.get("ctid")
-                or event.get("cid")
-                or info.get("cid")
-                or self.public_channel_id
-            )
-        if reply_mode == TARGETMODE_CHANNEL and reply_target != self.public_channel_id:
-            self._send_private(
-                invoker_id, f"Use private chat with {self.nickname} outside {self.public_channel_name}."
-            )
-            return
-        try:
-            response = self._dispatch_message(msg, info, invoker_name)
-        except ValueError as exc:
-            response = str(exc)
-        if not response:
-            return
-        if reply_mode == TARGETMODE_CLIENT:
-            self._send_private(invoker_id, response)
-        else:
-            self._send_channel(reply_target, response)
 
     def _dispatch_message(self, msg: str, client_info: Dict[str, str], invoker_name: str) -> Optional[str]:
         lowered = msg.lower()
@@ -779,6 +634,159 @@ class DiceBot:
         with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=True, separators=(",", ":"))
         os.replace(tmp_path, self.state_path)
+
+class DiceBot(DiceEngine):
+    def __init__(
+        self,
+        environ: Optional[Mapping[str, str]] = None,
+        query: "Optional[TS3QueryClient]" = None,
+    ) -> None:
+        env = os.environ if environ is None else environ
+        super().__init__(environ)
+        self.query_protocol = normalize_protocol(env.get("DICEBOT_QUERY_PROTOCOL"))
+        self.query_host = env.get("DICEBOT_QUERY_HOST", "127.0.0.1")
+        self.query_port = resolve_query_port(self.query_protocol, env.get("DICEBOT_QUERY_PORT"))
+        self.query_user = require_env("DICEBOT_QUERY_USER", env)
+        self.query_pass = require_env("DICEBOT_QUERY_PASS", env)
+        self.virtual_server_id = env.get("DICEBOT_VIRTUAL_SERVER_ID", "1")
+        self.ssh_host_key_sha256 = env.get("DICEBOT_SSH_HOST_KEY_SHA256", "").strip()
+        if query is None:
+            ssh_credentials = None
+            if self.query_protocol == "ssh":
+                # Fail at startup (exit 2), not inside the reconnect loop; find_spec does not import it.
+                if importlib.util.find_spec("paramiko") is None:
+                    raise ValueError(PARAMIKO_MISSING)
+                ssh_credentials = (self.query_user, self.query_pass, self.ssh_host_key_sha256)
+            query = TS3QueryClient(
+                self.query_host, self.query_port, protocol=self.query_protocol, ssh_credentials=ssh_credentials
+            )
+        self.query = query
+        self.self_clid: Optional[str] = None
+
+    def run_forever(self) -> None:
+        backoff = RECONNECT_SECONDS
+        while True:
+            try:
+                self._connect_and_loop()
+                backoff = RECONNECT_SECONDS
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"[dicebot] connection loop failed: {exc}", file=sys.stderr, flush=True)
+                self.query.close()
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+
+    def _connect_and_loop(self) -> None:
+        self._connect()
+        while True:
+            self.query.keepalive_if_idle()
+            event = self.query.recv_event(timeout=5)
+            if event is None:
+                continue
+            self._handle_event(event)
+
+    def _connect(self) -> None:
+        self.query.connect()
+        if self.query_protocol == "raw":
+            self.query.send_command(
+                f"login client_login_name={ts3_escape(self.query_user)} "
+                f"client_login_password={ts3_escape(self.query_pass)}"
+            )
+        self.query.send_command(f"use sid={self.virtual_server_id}")
+        self.public_channel_name = self._resolve_public_channel_name()
+        self.query.send_command(f"clientupdate client_nickname={ts3_escape(self.nickname)}")
+        self.group_name_by_id = self._load_group_names()
+        identity = self._whoami()
+        self.self_clid = identity["client_id"]
+        if identity.get("client_channel_id") != self.public_channel_id:
+            self.query.send_command(f"clientmove clid={self.self_clid} cid={self.public_channel_id}")
+        self.query.send_command("servernotifyregister event=textprivate")
+        self.query.send_command(f"servernotifyregister event=textchannel id={self.public_channel_id}")
+        print("[dicebot] connected and ready", flush=True)
+
+    def _resolve_public_channel_name(self) -> str:
+        if self._public_channel_name_override:
+            return self._public_channel_name_override
+        try:
+            records = self.query.send_command(f"channelinfo cid={self.public_channel_id}")
+            name = records[0].get("channel_name", "").strip() if records else ""
+        except QueryError:
+            name = ""
+        return name or f"channel {self.public_channel_id}"
+
+    def _load_group_names(self) -> Dict[str, str]:
+        groups = self.query.send_command("servergrouplist")
+        return {record["sgid"]: record["name"] for record in groups if "sgid" in record and "name" in record}
+
+    def _whoami(self) -> Dict[str, str]:
+        records = self.query.send_command("whoami")
+        if not records:
+            raise QueryError("whoami returned no records")
+        return records[0]
+
+    def _client_info(self, clid: str) -> Dict[str, str]:
+        records = self.query.send_command(f"clientinfo clid={clid}")
+        if not records:
+            raise QueryError(f"clientinfo returned no data for clid={clid}")
+        return records[0]
+
+    def _send_private(self, clid: str, message: str) -> None:
+        message = message[:MAX_MESSAGE_LEN]
+        self.query.send_command(
+            f"sendtextmessage targetmode={TARGETMODE_CLIENT} target={clid} msg={ts3_escape(message)}"
+        )
+
+    def _send_channel(self, cid: str, message: str) -> None:
+        message = message[:MAX_MESSAGE_LEN]
+        self.query.send_command(
+            f"sendtextmessage targetmode={TARGETMODE_CHANNEL} target={cid} msg={ts3_escape(message)}"
+        )
+
+    def _handle_event(self, event: Dict[str, str]) -> None:
+        event_name = event.get("event", "")
+        if event_name not in {"notifytextmessage", "notifytextprivate", "notifytextchannel"}:
+            return
+        invoker_id = event.get("invokerid")
+        invoker_name = event.get("invokername", "unknown")
+        msg = event.get("msg", "").strip()
+        if not invoker_id or not msg:
+            return
+        if invoker_id == self.self_clid:
+            return
+        info = self._client_info(invoker_id)
+        reply_mode = TARGETMODE_CLIENT
+        if event_name == "notifytextchannel" or event.get("targetmode") == str(TARGETMODE_CHANNEL):
+            reply_mode = TARGETMODE_CHANNEL
+
+        if reply_mode == TARGETMODE_CLIENT:
+            reply_target = invoker_id
+        else:
+            # Prefer the exact event target so replies go back to the same channel
+            # the command arrived from, even if the sender moves immediately after.
+            reply_target = (
+                event.get("target")
+                or event.get("ctid")
+                or event.get("cid")
+                or info.get("cid")
+                or self.public_channel_id
+            )
+        if reply_mode == TARGETMODE_CHANNEL and reply_target != self.public_channel_id:
+            self._send_private(
+                invoker_id, f"Use private chat with {self.nickname} outside {self.public_channel_name}."
+            )
+            return
+        try:
+            response = self._dispatch_message(msg, info, invoker_name)
+        except ValueError as exc:
+            response = str(exc)
+        if not response:
+            return
+        if reply_mode == TARGETMODE_CLIENT:
+            self._send_private(invoker_id, response)
+        else:
+            self._send_channel(reply_target, response)
+
 
 
 def normalize_protocol(value: Optional[str]) -> str:

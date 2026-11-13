@@ -1,5 +1,5 @@
 [Unit]
-Description=TeamSpeak Dice Bot
+Description=TeamSpeak FateMaker Normal-Client Dice Bot
 After=network-online.target teamspeak.service
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Type=simple
 User=amirali
 WorkingDirectory=/home/amirali/teamspeak-dicebot
 EnvironmentFile=/home/amirali/teamspeak-dicebot/dicebot.env
-ExecStart=/usr/bin/python3 /home/amirali/teamspeak-dicebot/dicebot.py
+ExecStart=/usr/bin/node /home/amirali/teamspeak-dicebot/voice-client.mjs
 Restart=always
 RestartSec=5
 

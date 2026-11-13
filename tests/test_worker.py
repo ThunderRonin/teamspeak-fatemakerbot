@@ -128,7 +128,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(
             listing.splitlines(),
             [
-                "[b]Initiative[/b]:",
+                "[b]Initiative[/b] (Round 0):",
                 "1. [b]VMA[/b] [color=lime]14[/color] [i](fixed)[/i]",
                 "2. [b]Zero[/b] [color=lime]0[/color] [i](fixed)[/i]",
             ],
@@ -177,7 +177,172 @@ class WorkerTests(unittest.TestCase):
         self.close_worker(restarted)
         self.assertEqual(restarted.returncode, 0)
         with self.state_path.open(encoding="utf-8") as handle:
-            self.assertEqual(json.load(handle), {"channels": {}})
+            state = json.load(handle)
+        self.assertEqual(state["channels"]["9"]["entries"], [])
+        self.assertTrue(state["channels"]["9"]["history"])
+        self.assertEqual(state["channels"]["9"]["round"], 0)
+
+    def test_high_low_selectors_and_boundaries(self):
+        process = self.start_worker()
+        for selector, operation in (("h", max), ("l", min), ("H", max), ("L", min)):
+            response = self.request(process, f"!2d20{selector}1")
+            match = re.search(r"= \[color=lime\](\d+)\[/color\].*?\[i\]\((\d+),(\d+)", response)
+            self.assertIsNotNone(match, response)
+            self.assertEqual(int(match.group(1)), operation(int(match.group(2)), int(match.group(3))))
+        for expr in ("!roll 2d20h0", "!roll 2d20l3"):
+            self.assertIn("Keep count", self.request(process, expr))
+        for expr in ("!2d20k1", "!2d20kh1", "!2d20kl1", "!2d20d1", "!2d20dh1", "!2d20dl1"):
+            self.assertIn("[color=lime]", self.request(process, expr))
+        help_text = self.request(process, "!help")
+        for feature in ("2d20h1", "2d20l1", "!init set", "!init undo"):
+            self.assertIn(feature, help_text)
+
+    def test_set_permissions_ambiguity_and_noop_history(self):
+        process = self.start_worker()
+        gm = {"sender_groups": ["42"]}
+        self.assertIn("Nothing to undo", self.request(process, "!init undo", **gm))
+        self.assertIn("empty", self.request(process, "!init next", **gm))
+        self.request(process, "!init clear", **gm)
+        self.assertIn("Nothing to undo", self.request(process, "!init undo", **gm))
+        response = self.request(process, '!init add "Red Mage" 10')
+        self.assertNotIn("Initiative", response)
+        self.assertNotIn("\n", response)
+        self.assertIn("GM only", self.request(process, '!init set "Red Mage" 20'))
+        self.assertIn("GM only", self.request(process, "!init undo"))
+        self.assertIn("No entry", self.request(process, "!init set Missing 20", **gm))
+        self.assertIn("Invalid dice", self.request(process, '!init set "Red Mage" bad', **gm))
+        self.assertIn("Unchanged", self.request(process, '!init set "RED MAGE" 10', **gm))
+        self.assertIn("empty", self.request(process, "!init undo", **gm))
+        self.request(process, "!init add Hero 10")
+        self.request(process, "!init add HERO 5")
+        self.assertIn("Ambiguous", self.request(process, "!init set hero 20", **gm))
+        self.assertIn("[color=lime]5[/color]", self.request(process, "!init list"))
+        self.assertIn("HERO", self.request(process, "!init undo", **gm).upper())
+        listing = self.request(process, "!init list")
+        self.assertNotIn("[color=lime]5[/color]", listing)
+        self.assertIn("[color=lime]10[/color]", listing)
+        self.assertIn("Set", self.request(process, "!init set hErO 1d2+30", **gm))
+        listing = self.request(process, "!init list")
+        self.assertRegex(listing, r"\[color=lime\]3[12]\[/color\]")
+        self.assertIn("[color=lime]10[/color]", self.request(process, "!init undo", **gm))
+
+    def test_rounds_resort_removal_and_undo(self):
+        process = self.start_worker()
+        gm = {"sender_groups": ["42"]}
+        for name, score in (("A", 30), ("B", 20), ("C", 10)):
+            self.request(process, f"!init add {name} {score}")
+        self.assertIn("Round 0", self.request(process, "!init list"))
+        self.assertIn("Round 1): [b]A", self.request(process, "!init next", **gm))
+        self.assertIn("Round 1): [b]B", self.request(process, "!init next", **gm))
+        self.request(process, "!init add D 40")
+        self.request(process, "!init set B 50", **gm)
+        listing = self.request(process, "!init list")
+        self.assertRegex(listing, r"\[b\]B\[/b\].*<= current")
+        self.assertIn("Round 1): [b]D", self.request(process, "!init next", **gm))
+        self.assertIn("Round 1): [b]A", self.request(process, "!init next", **gm))
+        self.assertIn("Round 1): [b]C", self.request(process, "!init next", **gm))
+        self.assertIn("Round 2): [b]B", self.request(process, "!init next", **gm))
+        self.request(process, "!init remove B", **gm)
+        self.assertIn("Round 2): [b]D", self.request(process, "!init next", **gm))
+        self.request(process, "!init undo", **gm)
+        restored = self.request(process, "!init undo", **gm)
+        self.assertRegex(restored, r"\[b\]B\[/b\].*<= current")
+        self.assertIn("Round 2", restored)
+        self.assertIn("Round 2): [b]D", self.request(process, "!init next", **gm))
+        self.request(process, "!init remove C", **gm)
+        self.assertRegex(self.request(process, "!init list"), r"\[b\]D\[/b\].*<= current")
+
+    def test_removing_last_entry_resets_round_and_can_be_undone(self):
+        process = self.start_worker()
+        gm = {"sender_groups": ["42"]}
+        self.request(process, "!init add A 10")
+        self.request(process, "!init next", **gm)
+        self.request(process, "!init next", **gm)
+        self.assertIn("Round 0", self.request(process, "!init remove A", **gm))
+        self.assertIn("Round 2", self.request(process, "!init undo", **gm))
+        self.request(process, "!init remove A", **gm)
+        self.request(process, "!init add B 5")
+        self.assertIn("Round 1): [b]B", self.request(process, "!init next", **gm))
+
+    def test_clear_restart_and_multilevel_channel_undo(self):
+        process = self.start_worker()
+        gm = {"sender_groups": ["42"]}
+        self.request(process, "!init add A 10")
+        self.request(process, "!init add B 5")
+        self.request(process, "!init next", **gm)
+        self.request(process, "!init next", **gm)
+        self.request(process, "!init next", **gm)
+        self.request(process, "!init add Other 8", channel_id="8")
+        self.request(process, "!init clear", **gm)
+        self.close_worker(process)
+        process = self.start_worker()
+        self.assertIn("Round 0", self.request(process, "!init list"))
+        restored = self.request(process, "!init undo", **gm)
+        self.assertIn("Round 2", restored)
+        self.assertRegex(restored, r"\[b\]A\[/b\].*<= current")
+        self.assertIn("Round 1", self.request(process, "!init undo", **gm))
+        self.assertIn("Other", self.request(process, "!init list", channel_id="8"))
+        self.assertIn("empty", self.request(process, "!init undo", channel_id="8", **gm))
+        self.assertIn("Round 1", self.request(process, "!init list"))
+
+    def test_history_is_bounded_and_noop_does_not_evict(self):
+        process = self.start_worker()
+        gm = {"sender_groups": ["42"]}
+        self.request(process, "!init add A 0")
+        for score in range(1, 51):
+            self.request(process, f"!init set A {score}", **gm)
+        self.request(process, "!init set A 50", **gm)
+        self.request(process, "!init remove Missing", **gm)
+        for _ in range(50):
+            self.assertIn("Undone", self.request(process, "!init undo", **gm))
+        self.assertIn("[color=lime]0[/color]", self.request(process, "!init list"))
+        self.assertIn("Nothing to undo", self.request(process, "!init undo", **gm))
+
+    def test_legacy_state_round_migration_and_invalid_channels(self):
+        entry = {"name": "Legacy", "total": 12, "detail": "fixed", "added_by": "GM"}
+        self.state_path.write_text(json.dumps({"channels": {
+            "8": {"entries": [entry], "cursor": -1},
+            "9": {"entries": [entry], "cursor": 0},
+            "10": {"entries": [entry], "cursor": -2},
+            "11": {"entries": [entry], "cursor": 0, "round": -1},
+        }}), encoding="utf-8")
+        process = self.start_worker()
+        self.assertIn("Round 0", self.request(process, "!init list", channel_id="8"))
+        self.assertIn("Round 1", self.request(process, "!init list"))
+        self.assertIn("Round 2", self.request(process, "!init next", sender_groups=["42"]))
+        self.assertIn("empty", self.request(process, "!init list", channel_id="10"))
+        self.assertIn("empty", self.request(process, "!init list", channel_id="11"))
+
+    def test_removal_predecessor_and_undo_restore_round(self):
+        process = self.start_worker()
+        gm = {"sender_groups": ["42"]}
+        for name, score in (("A", 30), ("B", 20), ("C", 10)):
+            self.request(process, f"!init add {name} {score}")
+        self.request(process, "!init next", **gm)
+        self.request(process, "!init next", **gm)
+        self.request(process, "!init remove B", **gm)
+        self.assertIn("Round 1): [b]C", self.request(process, "!init next", **gm))
+        self.request(process, "!init remove C", **gm)
+        self.assertIn("Round 2): [b]A", self.request(process, "!init next", **gm))
+        self.request(process, "!init undo", **gm)
+        restored = self.request(process, "!init undo", **gm)
+        self.assertIn("Round 1", restored)
+        self.assertRegex(restored, r"\[b\]C\[/b\].*<= current")
+        self.assertIn("Round 2): [b]A", self.request(process, "!init next", **gm))
+
+    def test_set_other_entry_preserves_active_and_undo(self):
+        process = self.start_worker()
+        gm = {"sender_groups": ["42"]}
+        self.request(process, "!init add A 10")
+        self.request(process, "!init add B 5")
+        self.request(process, "!init next", **gm)
+        self.request(process, "!init set B 20", **gm)
+        self.assertRegex(self.request(process, "!init list"), r"\[b\]A\[/b\].*<= current")
+        self.assertIn("Round 2): [b]B", self.request(process, "!init next", **gm))
+        self.request(process, "!init undo", **gm)
+        restored = self.request(process, "!init undo", **gm)
+        self.assertRegex(restored, r"\[b\]A\[/b\].*<= current")
+        self.assertIn("[color=lime]5[/color]", restored)
 
     def test_malformed_requests_are_fatal_without_fake_responses(self):
         valid = {

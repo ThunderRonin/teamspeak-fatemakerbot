@@ -42,17 +42,16 @@ TARGETMODE_CHANNEL = 2
 HELP_TEXT = (
     "[b]DiceBot[/b] commands: "
     "!roll <expr>, !adv <expr>, !dis <expr>, "
-    "!init add <name> <score|expr>, !init list, "
-    "!init next, !init remove <name>, "
-    "!init clear, !help. "
+    "!init add <name> <score|expr>, !init set <name> <score|expr>, !init list, "
+    "!init next, !init remove <name>, !init clear, !init undo, !help. "
     "[i]Shorthand[/i] (! optional): d20+2, 2d6+3, "
     "adv d20+5, dis d20+1, "
     "wd20+2, ld20-6. "
-    "[i]Keep/drop[/i]: 4d6k3, 4d6kh3, 4d6kl3, 4d6d1, 4d6dh1, 4d6dl1"
+    "[i]Keep/drop[/i]: 4d6k3, 4d6kh3, 4d6kl3, 2d20h1, 2d20l1, 4d6d1, 4d6dh1, 4d6dl1"
 )
 
 EXPR_RE = re.compile(
-    r"^\s*(\d*)d(\d+)((?:k|kh|kl|d|dh|dl)(\d+))?([+-]\d+)?\s*$",
+    r"^\s*(\d*)d(\d+)((?:k|kh|kl|h|l|d|dh|dl)(\d+))?([+-]\d+)?\s*$",
     re.IGNORECASE,
 )
 SHORT_ADV_RE = re.compile(r"^\s*(adv|dis)\s+(.+?)\s*$", re.IGNORECASE)
@@ -166,37 +165,75 @@ class InitiativeEntry:
 class InitiativeState:
     entries: List[InitiativeEntry] = field(default_factory=list)
     cursor: int = -1
+    round: int = 0
+    history: List[Dict[str, object]] = field(default_factory=list)
+
+    def snapshot(self) -> Dict[str, object]:
+        return {
+            "cursor": self.cursor,
+            "round": self.round,
+            "entries": [
+                {"name": entry.name, "total": entry.total, "detail": entry.detail,
+                 "added_by": entry.added_by}
+                for entry in self.entries
+            ],
+        }
+
+    def remember(self) -> None:
+        self.history.append(self.snapshot())
+        del self.history[:-50]
+
+    def undo(self) -> bool:
+        if not self.history:
+            return False
+        previous = self.from_dict(self.history.pop(), include_history=False)
+        self.entries, self.cursor, self.round = previous.entries, previous.cursor, previous.round
+        return True
+
+    def sort_entries(self, active: Optional[InitiativeEntry]) -> None:
+        self.entries.sort(key=lambda item: (-item.total, item.name.lower()))
+        if active is not None:
+            self.cursor = next(i for i, entry in enumerate(self.entries) if entry is active)
 
     def add(self, entry: InitiativeEntry) -> None:
+        active = self.entries[self.cursor] if self.cursor >= 0 else None
         self.entries.append(entry)
-        self.entries.sort(key=lambda item: (-item.total, item.name.lower()))
-        if self.cursor >= len(self.entries):
-            self.cursor = len(self.entries) - 1
+        self.sort_entries(active)
 
     def remove(self, name: str) -> bool:
-        lowered = name.lower()
-        new_entries = [entry for entry in self.entries if entry.name.lower() != lowered]
-        removed = len(new_entries) != len(self.entries)
-        self.entries = new_entries
+        lowered = name.casefold()
+        if not any(entry.name.casefold() == lowered for entry in self.entries):
+            return False
+        active = self.entries[self.cursor] if self.cursor >= 0 else None
+        predecessor = sum(entry.name.casefold() != lowered for entry in self.entries[:max(self.cursor, 0)]) - 1
+        self.entries = [entry for entry in self.entries if entry.name.casefold() != lowered]
         if not self.entries:
-            self.cursor = -1
-        elif self.cursor >= len(self.entries):
-            self.cursor = 0
-        return removed
+            self.round = 0
+        if active is not None and active.name.casefold() != lowered:
+            self.cursor = next(i for i, entry in enumerate(self.entries) if entry is active)
+        else:
+            self.cursor = predecessor if self.entries and active is not None else -1
+        return True
 
     def clear(self) -> None:
         self.entries.clear()
         self.cursor = -1
+        self.round = 0
 
     def next(self) -> Optional[InitiativeEntry]:
         if not self.entries:
             return None
+        if self.round == 0:
+            self.round = 1
+        elif self.cursor == len(self.entries) - 1:
+            self.round += 1
         self.cursor = (self.cursor + 1) % len(self.entries)
         return self.entries[self.cursor]
 
     def list_text(self) -> str:
+        heading = f"{bb_bold('Initiative')} (Round {self.round}):"
         if not self.entries:
-            return f"{bb_bold('Initiative')}: {bb_italic('empty')}"
+            return f"{heading} {bb_italic('empty')}"
         parts = []
         for idx, entry in enumerate(self.entries, start=1):
             marker = f" {bb_color('<= current', 'orange')}" if self.cursor == idx - 1 else ""
@@ -204,40 +241,41 @@ class InitiativeState:
                 f"{idx}. {bb_bold(entry.name)} "
                 f"{bb_color(str(entry.total), 'lime')} {bb_italic(f'({entry.detail})')}{marker}"
             )
-        return f"{bb_bold('Initiative')}:\n" + "\n".join(parts)
+        return heading + "\n" + "\n".join(parts)
 
     def to_dict(self) -> Dict[str, object]:
-        return {
-            "cursor": self.cursor,
-            "entries": [
-                {
-                    "name": entry.name,
-                    "total": entry.total,
-                    "detail": entry.detail,
-                    "added_by": entry.added_by,
-                }
-                for entry in self.entries
-            ],
-        }
+        return {**self.snapshot(), "history": self.history}
 
     @classmethod
-    def from_dict(cls, data: Dict[str, object]) -> "InitiativeState":
-        entries = [
-            InitiativeEntry(
-                name=str(item["name"]),
-                total=int(item["total"]),
-                detail=str(item["detail"]),
-                added_by=str(item.get("added_by", "unknown")),
-            )
-            for item in data.get("entries", [])
-            if isinstance(item, dict)
-        ]
-        cursor = int(data.get("cursor", -1))
-        if entries and cursor >= len(entries):
-            cursor = 0
-        if not entries:
-            cursor = -1
-        return cls(entries=entries, cursor=cursor)
+    def from_dict(cls, data: Dict[str, object], include_history: bool = True) -> "InitiativeState":
+        raw_entries = data.get("entries", [])
+        if not isinstance(raw_entries, list):
+            raise ValueError("invalid initiative entries")
+        entries = []
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                raise ValueError("invalid initiative entry")
+            name, total, detail = item.get("name"), item.get("total"), item.get("detail")
+            added_by = item.get("added_by", "unknown")
+            if not isinstance(name, str) or not isinstance(total, int) or isinstance(total, bool) or not isinstance(detail, str) or not isinstance(added_by, str):
+                raise ValueError("invalid initiative entry")
+            entries.append(InitiativeEntry(name, total, detail, added_by))
+        cursor = data.get("cursor", -1)
+        if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < -1 or cursor >= len(entries):
+            raise ValueError("invalid initiative cursor")
+        round_number = data.get("round", 0 if cursor == -1 else 1)
+        if not isinstance(round_number, int) or isinstance(round_number, bool) or round_number < 0 or (cursor >= 0 and round_number == 0):
+            raise ValueError("invalid initiative round")
+        state = cls(entries=entries, cursor=cursor, round=round_number)
+        if include_history:
+            raw_history = data.get("history", [])
+            if not isinstance(raw_history, list):
+                raise ValueError("invalid initiative history")
+            for snapshot in raw_history[-50:]:
+                if not isinstance(snapshot, dict):
+                    raise ValueError("invalid initiative snapshot")
+                state.history.append(cls.from_dict(snapshot, include_history=False).snapshot())
+        return state
 
 
 class QueryError(RuntimeError):
@@ -559,8 +597,8 @@ class DiceEngine:
         parts = shlex.split(msg)
         if len(parts) < 2:
             return (
-                f"{bb_bold('Usage')}: !init add <name> <score|expr> | "
-                f"list | next | remove <name> | clear"
+                f"{bb_bold('Usage')}: !init add|set <name> <score|expr> | "
+                f"list | next | remove <name> | clear | undo"
             )
         channel_id = client_info.get("cid") or self.public_channel_id
         state = self.initiative_by_channel.setdefault(channel_id, InitiativeState())
@@ -568,30 +606,51 @@ class DiceEngine:
 
         if subcommand == "list":
             return state.list_text()
-        if subcommand == "add":
+        if subcommand in {"add", "set"}:
+            if subcommand == "set" and not self._is_gm(client_info):
+                return f"{bb_bold('GM only')}: set initiative."
             if len(parts) < 4:
-                return f"{bb_bold('Usage')}: !init add <name> <score|expr>"
+                return f"{bb_bold('Usage')}: !init {subcommand} <name> <score|expr>"
             name = parts[2]
+            matches = [entry for entry in state.entries if entry.name.casefold() == name.casefold()]
+            if subcommand == "set":
+                if not matches:
+                    return f"{bb_bold('No entry')}: {bb_bold(name)}"
+                if len(matches) != 1:
+                    return f"{bb_bold('Ambiguous entry')}: {bb_bold(name)}"
             expr = " ".join(parts[3:])
             if re.fullmatch(r"[+-]?[0-9]+", expr):
                 result = DiceResult(total=int(expr), label=expr, breakdown="fixed")
             else:
                 result = roll_expression(expr)
-            state.add(InitiativeEntry(name=name, total=result.total, detail=result.breakdown, added_by=invoker_name))
+            if subcommand == "add":
+                state.remember()
+                state.add(InitiativeEntry(name=name, total=result.total, detail=result.breakdown, added_by=invoker_name))
+            else:
+                entry = matches[0]
+                if (entry.total, entry.detail) != (result.total, result.breakdown):
+                    state.remember()
+                    active = state.entries[state.cursor] if state.cursor >= 0 else None
+                    entry.total, entry.detail = result.total, result.breakdown
+                    state.sort_entries(active)
+                else:
+                    return f"{bb_bold('Unchanged')}: {bb_bold(entry.name)}"
             self._save_state()
+            action = "Added" if subcommand == "add" else "Set"
             return (
-                f"{bb_bold('Added')} {bb_bold(name)} at {bb_color(str(result.total), 'lime')} "
-                f"{bb_italic(f'({result.breakdown})')}.\n{state.list_text()}"
+                f"{bb_bold(action)} {bb_bold(name)} at {bb_color(str(result.total), 'lime')} "
+                f"{bb_italic(f'({result.breakdown})')}."
             )
         if subcommand == "next":
             if not self._is_gm(client_info):
                 return f"{bb_bold('GM only')}: advance initiative."
+            if not state.entries:
+                return state.list_text()
+            state.remember()
             entry = state.next()
             self._save_state()
-            if entry is None:
-                return f"{bb_bold('Initiative')}: {bb_italic('empty')}"
             return (
-                f"{bb_bold('Current turn')}: {bb_bold(entry.name)} at "
+                f"{bb_bold('Current turn')} (Round {state.round}): {bb_bold(entry.name)} at "
                 f"{bb_color(str(entry.total), 'lime')} {bb_italic(f'({entry.detail})')}"
             )
         if subcommand == "remove":
@@ -599,16 +658,27 @@ class DiceEngine:
                 return f"{bb_bold('GM only')}: remove initiative entries."
             if len(parts) < 3:
                 return f"{bb_bold('Usage')}: !init remove <name>"
-            if state.remove(parts[2]):
-                self._save_state()
-                return state.list_text()
-            return f"{bb_bold('No entry')}: {bb_bold(parts[2])}"
+            if not any(entry.name.casefold() == parts[2].casefold() for entry in state.entries):
+                return f"{bb_bold('No entry')}: {bb_bold(parts[2])}"
+            state.remember()
+            state.remove(parts[2])
+            self._save_state()
+            return state.list_text()
         if subcommand == "clear":
             if not self._is_gm(client_info):
                 return f"{bb_bold('GM only')}: clear initiative."
-            state.clear()
-            self._save_state()
+            if state.entries or state.cursor != -1 or state.round != 0:
+                state.remember()
+                state.clear()
+                self._save_state()
             return f"{bb_bold('Initiative cleared')}"
+        if subcommand == "undo":
+            if not self._is_gm(client_info):
+                return f"{bb_bold('GM only')}: undo initiative."
+            if not state.undo():
+                return f"{bb_bold('Nothing to undo')}"
+            self._save_state()
+            return f"{bb_bold('Undone')}. {state.list_text()}"
         return f"{bb_bold('Unknown !init command')}. Use !help."
 
     def _is_gm(self, client_info: Dict[str, str]) -> bool:
@@ -638,13 +708,18 @@ class DiceEngine:
         except Exception as exc:
             print(f"[dicebot] failed to load state: {exc}", file=sys.stderr, flush=True)
             return
+        if not isinstance(payload, dict):
+            return
         channels = payload.get("channels", {})
         if not isinstance(channels, dict):
             return
         loaded: Dict[str, InitiativeState] = {}
         for channel_id, state_data in channels.items():
             if isinstance(state_data, dict):
-                loaded[str(channel_id)] = InitiativeState.from_dict(state_data)
+                try:
+                    loaded[str(channel_id)] = InitiativeState.from_dict(state_data)
+                except (ValueError, TypeError):
+                    print(f"[dicebot] invalid initiative state for channel {channel_id}", file=sys.stderr, flush=True)
         self.initiative_by_channel = loaded
 
     def _save_state(self) -> None:
@@ -652,7 +727,7 @@ class DiceEngine:
             "channels": {
                 channel_id: state.to_dict()
                 for channel_id, state in self.initiative_by_channel.items()
-                if state.entries
+                if state.entries or state.history or state.round
             }
         }
         os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
@@ -863,13 +938,13 @@ def apply_selector(
     highest_first = sorted(indexed_rolls, key=lambda item: (-item[1], item[0]))
     lowest_first = sorted(indexed_rolls, key=lambda item: (item[1], item[0]))
 
-    if selector in {"k", "kh", "kl"}:
+    if selector in {"k", "kh", "kl", "h", "l"}:
         if selector_count < 1 or selector_count > count:
             raise ValueError(f"{bb_bold('Keep count')} must be between 1 and {count}")
-        chosen = highest_first[:selector_count] if selector in {"k", "kh"} else lowest_first[:selector_count]
+        chosen = highest_first[:selector_count] if selector in {"k", "kh", "h"} else lowest_first[:selector_count]
         chosen_ids = {idx for idx, _ in chosen}
         kept = [roll for idx, roll in indexed_rolls if idx in chosen_ids]
-        mode = f"kept highest {selector_count}" if selector in {"k", "kh"} else f"kept lowest {selector_count}"
+        mode = f"kept highest {selector_count}" if selector in {"k", "kh", "h"} else f"kept lowest {selector_count}"
         return kept, f" -> {mode}: " + ", ".join(str(roll) for roll in kept)
 
     if selector in {"d", "dh", "dl"}:

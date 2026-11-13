@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import types
+import threading
 import unittest
 from unittest import mock
 
@@ -91,7 +92,7 @@ def make_fake_paramiko():
             raise NotImplementedError
 
     class FakeSshTransportLayer:
-        def open_session(self):
+        def open_session(self, timeout=None):
             events.append("open_session")
             return channel
 
@@ -134,7 +135,8 @@ class SshTransportOpenTests(unittest.TestCase):
         self.assertEqual(
             events[0],
             ("connect", "h", {"port": 10022, "username": "u", "password": "secret-pw",
-                              "look_for_keys": False, "allow_agent": False, "timeout": 10}),
+                              "look_for_keys": False, "allow_agent": False, "timeout": 10,
+                              "banner_timeout": 10, "auth_timeout": 10}),
         )
         self.assertIn("open_session", events)
         self.assertNotIn("client.invoke_shell", events)
@@ -167,6 +169,50 @@ class SshTransportOpenTests(unittest.TestCase):
         transport.close()
         self.assertEqual(channel.calls[1:], [("sendall", b"whoami\r\n"), ("settimeout", 3), "close"])
         self.assertEqual(events[-1], "client.close")
+
+    def test_stalled_shell_request_fails_and_closes_connection(self):
+        module, events, channel = make_fake_paramiko()
+        released = threading.Event()
+        finished = threading.Event()
+        failures = []
+        original_client = module.SSHClient
+
+        def make_client():
+            client = original_client()
+            original_close = client.close
+
+            def close():
+                original_close()
+                released.set()
+
+            client.close = close
+            return client
+
+        def stalled_shell():
+            released.wait(5)
+            raise QueryError("shell negotiation closed")
+
+        def open_transport():
+            try:
+                SshTransport.open("h", 10022, "u", "pw", FP)
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                finished.set()
+
+        module.SSHClient = make_client
+        channel.invoke_shell = stalled_shell
+        with mock.patch.dict(sys.modules, {"paramiko": module}), \
+             mock.patch("dicebot.SSH_TIMEOUT_SECONDS", 0.1, create=True):
+            worker = threading.Thread(target=open_transport, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(finished.wait(2), "SSH shell negotiation did not time out")
+                self.assertEqual(len(failures), 1)
+                self.assertIn("client.close", events)
+            finally:
+                released.set()
+                worker.join(timeout=2)
 
 
 class SshModeTests(unittest.TestCase):

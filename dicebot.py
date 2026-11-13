@@ -17,6 +17,7 @@ import re
 import shlex
 import socket
 import sys
+import threading
 import time
 import json
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ MAX_DIE_SIDES = 1000
 MAX_MESSAGE_LEN = 400
 RECONNECT_SECONDS = 5
 KEEPALIVE_SECONDS = 60
+SSH_TIMEOUT_SECONDS = 10
 COMMAND_INTERVAL_SECONDS = 0.4  # TS3 and TS6 default flood limit is 10 commands per 3 s; stay well under
 
 TARGETMODE_CLIENT = 1
@@ -299,11 +301,22 @@ class SshTransport:
                 password=password,
                 look_for_keys=False,
                 allow_agent=False,
-                timeout=10,
+                timeout=SSH_TIMEOUT_SECONDS,
+                banner_timeout=SSH_TIMEOUT_SECONDS,
+                auth_timeout=SSH_TIMEOUT_SECONDS,
             )
             # SSHClient.invoke_shell() always requests a PTY; TS6 expects a plain shell.
-            channel = client.get_transport().open_session()
-            channel.invoke_shell()
+            channel = client.get_transport().open_session(timeout=SSH_TIMEOUT_SECONDS)
+            # Paramiko's shell request ignores channel I/O timeouts. Closing the
+            # client releases its unbounded acknowledgement wait.
+            shell_deadline = threading.Timer(SSH_TIMEOUT_SECONDS, client.close)
+            shell_deadline.daemon = True
+            shell_deadline.start()
+            try:
+                channel.invoke_shell()
+            finally:
+                shell_deadline.cancel()
+                shell_deadline.join()
         except BaseException:
             client.close()
             raise
@@ -347,7 +360,7 @@ class TS3QueryClient:
         self.clock = clock
         self.sleep = sleep
         self.transport: Optional[Transport] = None
-        self.buffer = ""
+        self.buffer = b""
         self.event_queue: List[Dict[str, str]] = []
         self.last_command_at = self.clock()
 
@@ -382,7 +395,7 @@ class TS3QueryClient:
                 return
             if line == "" or line.startswith("virtualserver_status=") or line.startswith("error id=0"):
                 continue
-            self.buffer = line + "\n" + self.buffer  # not ours; put it back
+            self.buffer = line.encode("utf-8") + b"\n" + self.buffer  # not ours; put it back
             return
 
     def close(self) -> None:
@@ -396,7 +409,7 @@ class TS3QueryClient:
             except Exception:
                 pass
         self.transport = None
-        self.buffer = ""
+        self.buffer = b""
         self.event_queue.clear()
 
     def send_command(self, command: str, timeout: int = 10) -> List[Dict[str, str]]:
@@ -418,9 +431,9 @@ class TS3QueryClient:
     def recv_event(self, timeout: int = 1) -> Optional[Dict[str, str]]:
         if self.event_queue:
             return self.event_queue.pop(0)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            line = self._wait_for_line(timeout=max(0.1, deadline - time.time()), allow_timeout=True)
+        deadline = self.clock() + timeout
+        while self.clock() < deadline:
+            line = self._wait_for_line(timeout=deadline - self.clock(), allow_timeout=True)
             if line is None:
                 return None
             if line.startswith("notify"):
@@ -433,13 +446,19 @@ class TS3QueryClient:
         return None
 
     def _wait_for_line(self, timeout: float, allow_timeout: bool = False) -> Optional[str]:
+        deadline = self.clock() + timeout
         while True:
-            if "\n" in self.buffer:
-                line, self.buffer = self.buffer.split("\n", 1)
-                return line.strip("\r")
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                if allow_timeout:
+                    return None
+                raise QueryError("timed out waiting for TeamSpeak response")
+            if b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                return line.strip(b"\r").decode("utf-8", errors="replace")
             try:
                 assert self.transport is not None
-                self.transport.settimeout(timeout)
+                self.transport.settimeout(remaining)
                 chunk = self.transport.recv(65535)
             except socket.timeout:
                 if allow_timeout:
@@ -447,13 +466,16 @@ class TS3QueryClient:
                 raise QueryError("timed out waiting for TeamSpeak response")
             if not chunk:
                 raise QueryError("connection closed by TeamSpeak")
-            self.buffer += chunk.decode("utf-8", errors="replace")
+            self.buffer += chunk
 
     def _drain_until_error(self, timeout: int) -> List[Dict[str, str]]:
         records: List[Dict[str, str]] = []
-        deadline = time.time() + timeout
+        deadline = self.clock() + timeout
         while True:
-            line = self._wait_for_line(timeout=max(0.1, deadline - time.time()))
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                raise QueryError("timed out waiting for TeamSpeak response")
+            line = self._wait_for_line(timeout=remaining)
             if line.startswith("notify"):
                 event_name, _, payload = line.partition(" ")
                 event = {"event": event_name}
@@ -540,8 +562,10 @@ class DiceBot:
         self.public_channel_name = self._resolve_public_channel_name()
         self.query.send_command(f"clientupdate client_nickname={ts3_escape(self.nickname)}")
         self.group_name_by_id = self._load_group_names()
-        self.self_clid = self._whoami()["client_id"]
-        self.query.send_command(f"clientmove clid={self.self_clid} cid={self.public_channel_id}")
+        identity = self._whoami()
+        self.self_clid = identity["client_id"]
+        if identity.get("client_channel_id") != self.public_channel_id:
+            self.query.send_command(f"clientmove clid={self.self_clid} cid={self.public_channel_id}")
         self.query.send_command("servernotifyregister event=textprivate")
         self.query.send_command(f"servernotifyregister event=textchannel id={self.public_channel_id}")
         print("[dicebot] connected and ready", flush=True)

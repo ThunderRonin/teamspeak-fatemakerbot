@@ -30,3 +30,18 @@ class ConnectSequenceTests(unittest.TestCase):
         DiceBot(environ=BASE_ENV, query=q)._connect()
         self.assertIn("servernotifyregister event=textprivate", q.commands)
         self.assertIn("servernotifyregister event=textchannel id=2", q.commands)
+
+    def test_connect_succeeds_when_already_in_public_channel(self):
+        class AlreadyJoinedQuery(RecordingQuery):
+            def send_command(self, cmd, timeout=10):
+                if cmd == "whoami":
+                    self.commands.append(cmd)
+                    return [{"client_id": "9", "client_channel_id": "2"}]
+                return super().send_command(cmd, timeout)
+
+        query = AlreadyJoinedQuery(fail={"clientmove"})
+        bot = DiceBot(environ=BASE_ENV, query=query)
+        bot._connect()
+        self.assertEqual(bot.self_clid, "9")
+        self.assertIn("servernotifyregister event=textprivate", query.commands)
+        self.assertIn("servernotifyregister event=textchannel id=2", query.commands)

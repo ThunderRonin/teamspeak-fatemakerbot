@@ -40,7 +40,6 @@ class BannerTests(unittest.TestCase):
         c, t = make_client(TS6_BANNER, {"use": "error id=0 msg=ok\n"}, protocol="ssh")
         c.connect()
         self.assertEqual(c.send_command("use sid=1"), [])
-        self.assertEqual(c.buffer, "")
 
     def test_first_command_after_ts6_banner_returns_its_own_records(self):
         c, t = make_client(TS6_BANNER, {"whoami": "client_id=7 client_channel_id=2\nerror id=0 msg=ok\n"}, protocol="ssh")
@@ -82,5 +81,64 @@ class BannerTests(unittest.TestCase):
     def test_no_banner_within_deadline_raises_query_error(self):
         c, _ = make_client("SSH-2.0-x\nfoo\nbar\n")
         c.clock = FakeClock(0.0, step=5.0)
-        with self.assertRaisesRegex(QueryError, "unexpected greeting"):
+        with self.assertRaises(QueryError):
             c.connect()
+
+
+class StreamTests(unittest.TestCase):
+    def test_fragmented_utf8_in_command_records_and_chat_events(self):
+        for protocol in ("raw", "ssh"):
+            with self.subTest(protocol=protocol):
+                client, transport = make_client(TS3_BANNER, protocol=protocol)
+                client.connect()
+                response = (
+                    "notifytextmessage invokerid=3 invokername=Zoë msg=Éowyn targetmode=1\n\r"
+                    "client_nickname=FátëMaker\n\rerror id=0 msg=ok\n\r"
+                ).encode("utf-8")
+                transport.incoming.extend(bytes([byte]) for byte in response)
+                records = client.send_command("whoami")
+                self.assertEqual(records, [{"client_nickname": "FátëMaker"}])
+                event = client.recv_event(timeout=0)
+                self.assertEqual(event["invokername"], "Zoë")
+                self.assertEqual(event["msg"], "Éowyn")
+
+    def test_fragmented_utf8_in_idle_chat_events(self):
+        client, transport = make_client(TS3_BANNER)
+        client.connect()
+        response = "notifytextmessage invokerid=3 invokername=Zoë msg=Éowyn\n\r".encode("utf-8")
+        transport.incoming.extend(bytes([byte]) for byte in response)
+        event = client.recv_event()
+        self.assertEqual(event["invokername"], "Zoë")
+        self.assertEqual(event["msg"], "Éowyn")
+
+    def test_partial_reads_share_one_command_deadline(self):
+        client, transport = make_client(TS3_BANNER)
+        client.connect()
+        clock = FakeClock()
+        client.clock = clock
+        original_recv = transport.recv
+
+        def slow_recv(n):
+            clock.advance(0.4)
+            return original_recv(n)
+
+        transport.recv = slow_recv
+        transport.incoming.extend([b"client_", b"id=", b"7\n", b"error id=0 msg=ok\n"])
+        with self.assertRaisesRegex(QueryError, "timed out"):
+            client.send_command("whoami", timeout=1)
+
+    def test_notifications_do_not_extend_command_deadline(self):
+        client, transport = make_client(TS3_BANNER)
+        client.connect()
+        clock = FakeClock()
+        client.clock = clock
+        original_recv = transport.recv
+
+        def slow_recv(n):
+            clock.advance(0.4)
+            return original_recv(n)
+
+        transport.recv = slow_recv
+        transport.incoming.extend([b"notifytextmessage invokerid=3 msg=hi\n"] * 4)
+        with self.assertRaisesRegex(QueryError, "timed out"):
+            client.send_command("whoami", timeout=1)

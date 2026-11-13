@@ -25,7 +25,7 @@ RUN groupadd --gid 10001 dicebot \
     && mkdir -p /data \
     && chown dicebot:dicebot /data
 
-COPY --chown=dicebot:dicebot dicebot.py worker.py voice-client.mjs package.json ./
+COPY --chown=dicebot:dicebot dicebot.py worker.py voice-client.mjs message-chunks.mjs package.json ./
 
 USER dicebot
 

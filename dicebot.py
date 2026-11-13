@@ -42,7 +42,7 @@ TARGETMODE_CHANNEL = 2
 HELP_TEXT = (
     "[b]DiceBot[/b] commands: "
     "!roll <expr>, !adv <expr>, !dis <expr>, "
-    "!init add <name> <expr>, !init list, "
+    "!init add <name> <score|expr>, !init list, "
     "!init next, !init remove <name>, "
     "!init clear, !help. "
     "[i]Shorthand[/i] (! optional): d20+2, 2d6+3, "
@@ -57,6 +57,27 @@ EXPR_RE = re.compile(
 )
 SHORT_ADV_RE = re.compile(r"^\s*(adv|dis)\s+(.+?)\s*$", re.IGNORECASE)
 SHORT_WL_RE = re.compile(r"^\s*([wl])\s*((?:\d*)d\d+(?:[+-]\d+)?)\s*$", re.IGNORECASE)
+
+
+def chunk_message(message: str):
+    chunks = []
+    current = ""
+    for line in message.split("\n"):
+        combined = current + "\n" + line if current else line
+        if len(combined.encode("utf-8")) <= MAX_MESSAGE_LEN:
+            current = combined
+            continue
+        if current:
+            chunks.append(current)
+        current = ""
+        for character in line:
+            if len((current + character).encode("utf-8")) > MAX_MESSAGE_LEN:
+                chunks.append(current)
+                current = ""
+            current += character
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def ts3_escape(value: str) -> str:
@@ -183,7 +204,7 @@ class InitiativeState:
                 f"{idx}. {bb_bold(entry.name)} "
                 f"{bb_color(str(entry.total), 'lime')} {bb_italic(f'({entry.detail})')}{marker}"
             )
-        return f"{bb_bold('Initiative')}: " + " | ".join(parts)
+        return f"{bb_bold('Initiative')}:\n" + "\n".join(parts)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -538,7 +559,7 @@ class DiceEngine:
         parts = shlex.split(msg)
         if len(parts) < 2:
             return (
-                f"{bb_bold('Usage')}: !init add <name> <expr> | "
+                f"{bb_bold('Usage')}: !init add <name> <score|expr> | "
                 f"list | next | remove <name> | clear"
             )
         channel_id = client_info.get("cid") or self.public_channel_id
@@ -549,15 +570,18 @@ class DiceEngine:
             return state.list_text()
         if subcommand == "add":
             if len(parts) < 4:
-                return f"{bb_bold('Usage')}: !init add <name> <expr>"
+                return f"{bb_bold('Usage')}: !init add <name> <score|expr>"
             name = parts[2]
             expr = " ".join(parts[3:])
-            result = roll_expression(expr)
+            if re.fullmatch(r"[+-]?[0-9]+", expr):
+                result = DiceResult(total=int(expr), label=expr, breakdown="fixed")
+            else:
+                result = roll_expression(expr)
             state.add(InitiativeEntry(name=name, total=result.total, detail=result.breakdown, added_by=invoker_name))
             self._save_state()
             return (
                 f"{bb_bold('Added')} {bb_bold(name)} at {bb_color(str(result.total), 'lime')} "
-                f"{bb_italic(f'({result.breakdown})')}. {state.list_text()}"
+                f"{bb_italic(f'({result.breakdown})')}.\n{state.list_text()}"
             )
         if subcommand == "next":
             if not self._is_gm(client_info):
@@ -734,16 +758,16 @@ class DiceBot(DiceEngine):
         return records[0]
 
     def _send_private(self, clid: str, message: str) -> None:
-        message = message[:MAX_MESSAGE_LEN]
-        self.query.send_command(
-            f"sendtextmessage targetmode={TARGETMODE_CLIENT} target={clid} msg={ts3_escape(message)}"
-        )
+        for chunk in chunk_message(message):
+            self.query.send_command(
+                f"sendtextmessage targetmode={TARGETMODE_CLIENT} target={clid} msg={ts3_escape(chunk)}"
+            )
 
     def _send_channel(self, cid: str, message: str) -> None:
-        message = message[:MAX_MESSAGE_LEN]
-        self.query.send_command(
-            f"sendtextmessage targetmode={TARGETMODE_CHANNEL} target={cid} msg={ts3_escape(message)}"
-        )
+        for chunk in chunk_message(message):
+            self.query.send_command(
+                f"sendtextmessage targetmode={TARGETMODE_CHANNEL} target={cid} msg={ts3_escape(chunk)}"
+            )
 
     def _handle_event(self, event: Dict[str, str]) -> None:
         event_name = event.get("event", "")

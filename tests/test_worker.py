@@ -107,6 +107,33 @@ class WorkerTests(unittest.TestCase):
         self.assertIn(int(match.group(1)), (1, 2))
         self.assertIsNone(process.poll())
 
+    def test_fixed_initiative_scores_are_sorted_and_persisted(self):
+        process = self.start_worker()
+        self.assertIn("[color=lime]14[/color]", self.request(process, "!init add VMA 14"))
+        self.assertIn("[color=lime]-2[/color]", self.request(process, '!init add "Low Roll" -2'))
+        self.assertIn("[color=lime]0[/color]", self.request(process, "!init add Zero 0"))
+        self.close_worker(process)
+        restarted = self.start_worker()
+        listing = self.request(restarted, "!init list")
+        self.assertLess(listing.index("VMA"), listing.index("Zero"))
+        self.assertLess(listing.index("Zero"), listing.index("Low Roll"))
+        self.assertIn("[color=lime]14[/color]", listing)
+        self.assertIn("[color=lime]-2[/color]", listing)
+
+    def test_initiative_list_places_each_entry_on_its_own_line(self):
+        process = self.start_worker()
+        self.request(process, "!init add VMA 14")
+        self.request(process, "!init add Zero 0")
+        listing = self.request(process, "!init list")
+        self.assertEqual(
+            listing.splitlines(),
+            [
+                "[b]Initiative[/b]:",
+                "1. [b]VMA[/b] [color=lime]14[/color] [i](fixed)[/i]",
+                "2. [b]Zero[/b] [color=lime]0[/color] [i](fixed)[/i]",
+            ],
+        )
+
     def test_unicode_initiative_persists_and_membership_is_fresh(self):
         process = self.start_worker()
         self.assertIn("Éowyn 火", self.request(process, '!init add "Éowyn 火" 1d2+9'))

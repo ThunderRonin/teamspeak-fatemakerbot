@@ -4,6 +4,7 @@ import { chmod, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { chunkMessage } from './message-chunks.mjs';
 import { Client, generateIdentity, parseIdentity } from '@honeybbq/teamspeak/client';
 import {
   asChannelID,
@@ -250,15 +251,15 @@ async function main() {
 
     async function reply(event, text) {
       if (!text) return;
-      // Python slices Unicode code points, rather than JavaScript UTF-16 code units.
-      const response = Array.from(text).slice(0, 400).join('');
-      if (event.targetMode === 2) {
-        if (client.channelID !== options.channelId) {
-          throw new BridgeError('Refusing a channel reply outside the configured channel.');
+      if (event.targetMode === 2 && client.channelID !== options.channelId) {
+        throw new BridgeError('Refusing a channel reply outside the configured channel.');
+      }
+      for (const response of chunkMessage(text)) {
+        if (event.targetMode === 2) {
+          await sendChannelMessage(client, response, { timeoutMs: 5000 });
+        } else {
+          await sendPrivateMessage(client, event.invokerID, response, { timeoutMs: 5000 });
         }
-        await sendChannelMessage(client, response, { timeoutMs: 5000 });
-      } else {
-        await sendPrivateMessage(client, event.invokerID, response, { timeoutMs: 5000 });
       }
     }
 

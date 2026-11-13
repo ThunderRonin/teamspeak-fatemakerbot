@@ -22,8 +22,8 @@ TeamSpeak dice bot for `hallucinators`. Connects as a normal user, like Roadie, 
   - `!roll <expr>`
   - `!adv <expr>`
   - `!dis <expr>`
-  - `!init add <name> <expr>`
-  - `!init list`
+  - `!init add <name> <score|expr>` — e.g. `!init add VMA 14` or `!init add VMA d20+3`
+  - `!init list` — one initiative entry per line; long lists are split across messages
   - `!init next`
   - `!init remove <name>`
   - `!init clear`

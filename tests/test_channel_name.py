@@ -55,3 +55,12 @@ class ChannelNameTests(unittest.TestCase):
             q.commands[-1],
             r"sendtextmessage targetmode=1 target=3 msg=Use\sprivate\schat\swith\sThe\sFateMaker\soutside\sHallucinators.",
         )
+
+    def test_long_list_is_not_truncated_in_query_mode(self):
+        q = RecordingQuery()
+        bot = DiceBot(environ=BASE_ENV, query=q)
+        message = "\n".join(f"{i}. Hero{i} has initiative 14" for i in range(1, 30))
+        bot._send_private("3", message)
+        chunks = [command.split(" msg=", 1)[1].replace(r"\s", " ").replace(r"\n", "\n") for command in q.commands]
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("\n".join(chunks), message)

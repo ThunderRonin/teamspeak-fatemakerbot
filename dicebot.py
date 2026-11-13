@@ -45,7 +45,7 @@ HELP_TEXT = (
     "!init add <name> <expr>, !init list, "
     "!init next, !init remove <name>, "
     "!init clear, !help. "
-    "[i]Shorthand[/i]: d20+2, 2d6+3, "
+    "[i]Shorthand[/i] (! optional): d20+2, 2d6+3, "
     "adv d20+5, dis d20+1, "
     "wd20+2, ld20-6. "
     "[i]Keep/drop[/i]: 4d6k3, 4d6kh3, 4d6kl3, 4d6d1, 4d6dh1, 4d6dl1"
@@ -520,6 +520,8 @@ class DiceEngine:
         if lowered.startswith("!dis "):
             return self._format_roll(msg[5:].strip(), mode="dis")
 
+        if msg.startswith("!"):
+            msg = msg[1:]
         shorthand = SHORT_ADV_RE.match(msg)
         if shorthand:
             mode = shorthand.group(1).lower()

@@ -33,7 +33,9 @@ TeamSpeak dice bot for `hallucinators`. Connects as a normal user, like Roadie, 
 
 - anyone can roll
 - only `GM` can advance, remove, or clear initiative
-- shorthand works without prefixes when the whole message is a dice expression:
+- shorthand works with or without `!` when the whole message is a dice expression:
+  - `!d20`
+  - `!2d6+3`
   - `d20+2`
   - `2d6+3`
   - `adv d20+5`

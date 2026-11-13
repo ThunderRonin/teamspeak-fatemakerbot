@@ -88,6 +88,15 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNone(self.request(process, "hello"))
         self.assertIn("!roll", self.request(process, "!help"))
 
+    def test_bang_prefixed_dice_shorthand(self):
+        process = self.start_worker()
+        for expression in ("!d20", "!2d6+3", "!4d6kh3", "!wd20+2", "!ld20-1"):
+            with self.subTest(expression=expression):
+                response = self.request(process, expression)
+                self.assertIsNotNone(response, expression)
+                self.assertIn("[color=lime]", response)
+        self.assertIsNone(self.request(process, "!d20 is a roll"))
+
     def test_dice_errors_are_chat_responses_not_worker_failures(self):
         process = self.start_worker()
         self.assertIn("Invalid dice expression", self.request(process, "!roll broken"))
